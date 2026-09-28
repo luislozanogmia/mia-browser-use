@@ -11,6 +11,7 @@ from bridge_auth import load_bridge_token, token_path
 from bridge_transport import BridgeTransport
 from ghost_tool_defs import TOOL_NAMES
 from in_app_browser_transport import InAppBrowserTransport
+from page_context import find_active_page, page_note
 
 
 HERMES_COMMANDS = {
@@ -100,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
     call.add_argument("--allow-eval", action="store_true", help="Explicitly allow ghost_eval for this call")
 
+    context = sub.add_parser("context", help="Print a note about the page the user has open, for prompt hooks")
+    context.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
+    context.add_argument("--format", choices=("text", "hook"), default="text", help="hook prints Claude Code/Codex UserPromptSubmit JSON")
+
     token = sub.add_parser("bridge-token", help="Create and print the Chrome extension pairing token")
     token.add_argument("--path-only", action="store_true", help="Print only the token file path")
 
@@ -107,6 +112,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=9377)
     serve.add_argument("--allow-eval", action="store_true", help="Explicitly enable ghost_eval in the bridge")
     return parser
+
+
+def page_context_note(client: BrowserClient) -> str:
+    """Return the note for the user's open web page, or "" when there is none."""
+    try:
+        status = client.connect()
+        page = find_active_page(status, client.call)
+    except Exception:
+        return ""
+    return page_note(page) if page else ""
+
+
+def print_context(note: str, fmt: str) -> None:
+    if not note:
+        return
+    if fmt == "hook":
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}}, ensure_ascii=False))
+    else:
+        print(note)
 
 
 def main() -> None:
@@ -121,6 +145,10 @@ def main() -> None:
             from bridge_server import BridgeServer
 
             asyncio.run(BridgeServer(port=args.port, allow_eval=args.allow_eval).run())
+            return
+        if args.subcommand == "context":
+            # Prompt hooks must never block the user's message, so failures print nothing.
+            print_context(page_context_note(BrowserClient(args.backend)), args.format)
             return
 
         client = BrowserClient(args.backend, allow_eval=getattr(args, "allow_eval", False))

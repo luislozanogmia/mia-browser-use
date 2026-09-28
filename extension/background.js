@@ -238,6 +238,7 @@ async function handleCommand(command, args) {
 
 async function tabList() {
   const tabs = await chrome.tabs.query({});
+  const focusedWindow = await chrome.windows.getLastFocused().catch(() => null);
   return {
     tabs: tabs.map((t, i) => ({
       index: i,
@@ -245,6 +246,7 @@ async function tabList() {
       url: t.url,
       title: t.title,
       active: t.active,
+      focused: Boolean(focusedWindow && t.windowId === focusedWindow.id),
       windowId: t.windowId,
     })),
   };

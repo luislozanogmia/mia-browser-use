@@ -38,6 +38,29 @@ or install `hermes-plugin/` as a Hermes Agent plugin. The plugin defaults to
 `auto`, preferring the Hermes Desktop browser when present and otherwise using
 the Chrome extension.
 
+## Share the open page with the agent
+
+`ghost-cli context` prints a short note with the URL and title of the web page
+the user has open, plus a reminder that the agent can read it with Ghost. It
+prints nothing when no browser is connected or the tab is not an `http(s)`
+page, so it is safe to run on every prompt. Page content is never included.
+
+Claude Code (`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`) can
+add it to each message with a `UserPromptSubmit` hook:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "/path/to/ghost-cli context --format hook", "timeout": 10}]}
+    ]
+  }
+}
+```
+
+The Hermes plugin does the same through its `pre_llm_call` hook in local CLI,
+TUI, and desktop sessions. Set `page_context: false` to turn it off.
+
 ## Supported tools
 
 `ghost_status`, `ghost_tab_list`, `ghost_tab_open`, `ghost_tab_switch`,

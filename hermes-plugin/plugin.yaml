@@ -20,6 +20,8 @@ provides_tools:
   - ghost_screenshot
   - ghost_scroll
   - ghost_wait
+provides_hooks:
+  - pre_llm_call
 config_schema:
   backend:
     type: string
@@ -33,3 +35,7 @@ config_schema:
     type: boolean
     required: false
     description: "Explicitly enable arbitrary page JavaScript through ghost_eval. Defaults to false."
+  page_context:
+    type: boolean
+    required: false
+    description: "Tell the model which web page the user has open (URL and title) before each turn. Defaults to true."

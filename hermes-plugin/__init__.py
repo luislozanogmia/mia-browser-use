@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from .client import BrowserClient
+from .page_context import find_active_page, page_note
 
 
 def _schema(properties=None, required=None):
@@ -13,6 +14,8 @@ def _schema(properties=None, required=None):
         value["required"] = required
     return value
 
+
+LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop"})
 
 TOOL_SPECS = (
     ("ghost_status", "Check the selected browser connection and page.", _schema()),
@@ -48,6 +51,21 @@ def register(ctx) -> None:
             except Exception as exc:
                 return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
         return run
+
+    def page_context(platform="", **_kwargs):
+        # Messaging gateways can carry other people's messages; share the page only locally.
+        if platform not in LOCAL_PLATFORMS:
+            return None
+        try:
+            client = BrowserClient(backend, chrome_port)
+            status = client.connect()
+            page = find_active_page(status, client.transport.call)
+        except Exception:
+            return None
+        return {"context": page_note(page)} if page else None
+
+    if ctx.get_config("page_context", True) and hasattr(ctx, "register_hook"):
+        ctx.register_hook("pre_llm_call", page_context)
 
     for name, description, parameters in TOOL_SPECS:
         ctx.register_tool(

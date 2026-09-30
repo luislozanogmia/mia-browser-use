@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from typing import Any
 
 from bridge_auth import load_bridge_token, token_path
@@ -34,10 +35,23 @@ HERMES_COMMANDS = {
 }
 
 
+ACTOR_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def validate_actor(actor: str | None) -> str | None:
+    if actor in (None, ""):
+        return None
+    if not ACTOR_RE.match(actor):
+        raise ValueError("actor must be 1-64 of A-Z a-z 0-9 _ . : -")
+    return actor
+
+
 class BrowserClient:
-    def __init__(self, backend: str = "auto", allow_eval: bool = False):
+    def __init__(self, backend: str = "auto", allow_eval: bool = False, actor: str | None = None):
         self.backend = backend
         self.allow_eval = allow_eval
+        # Who is acting. Set by whoever runs the bot, never chosen by the model.
+        self.actor = validate_actor(actor)
         self.transport: Any = None
 
     def connect(self):
@@ -74,6 +88,8 @@ class BrowserClient:
             status = None
         if command == "ghost_status":
             return status if status is not None else self.transport.status()
+        if self.actor:
+            args = {**args, "actor_id": self.actor}
         if self.backend == "hermes":
             mapped = HERMES_COMMANDS.get(command)
             if not mapped:
@@ -101,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("--args", type=_json_object, default={})
     call.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
     call.add_argument("--allow-eval", action="store_true", help="Explicitly allow ghost_eval for this call")
+    call.add_argument("--actor", default=os.getenv("GHOST_ACTOR_ID"), help="Act as this bot or human (multiplayer); calls then need tab_id and never change the human's view")
 
     context = sub.add_parser("context", help="Print a note about the page the user has open, for prompt hooks")
     context.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
@@ -152,7 +169,7 @@ def main() -> None:
             print_context(page_context_note(BrowserClient(args.backend)), args.format)
             return
 
-        client = BrowserClient(args.backend, allow_eval=getattr(args, "allow_eval", False))
+        client = BrowserClient(args.backend, allow_eval=getattr(args, "allow_eval", False), actor=getattr(args, "actor", None))
         if args.subcommand == "status":
             result = client.connect()
         else:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import struct
@@ -328,9 +329,13 @@ class HermesDesktopClient:
 
 
 class BrowserClient:
-    def __init__(self, backend: str = "auto", chrome_port: int = 9378, allow_eval: bool = False):
+    def __init__(self, backend: str = "auto", chrome_port: int = 9378, allow_eval: bool = False, actor: str | None = None):
         if backend not in {"auto", "chrome", "hermes"}:
             raise GhostClientError("backend must be auto, chrome, or hermes")
+        if actor and not re.match(r"^[A-Za-z0-9_.:-]{1,64}$", actor):
+            raise GhostClientError("actor_id must be 1-64 of A-Z a-z 0-9 _ . : -")
+        # Who is acting. Set in the plugin config, never chosen by the model.
+        self.actor = actor or None
         self.backend = backend
         self.chrome_port = chrome_port
         self.allow_eval = allow_eval
@@ -375,4 +380,6 @@ class BrowserClient:
             status = None
         if command == "ghost_status":
             return status if status is not None else self.transport.status()
+        if self.actor:
+            args = {**args, "actor_id": self.actor}
         return self.transport.call(command, args)

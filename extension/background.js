@@ -176,7 +176,7 @@ function scheduleReconnect() {
 // Command router — maps ghost-cli tool names to Chrome APIs
 // ---------------------------------------------------------------------------
 
-async function handleCommand(command, args) {
+async function routeCommand(command, args) {
   switch (command) {
     case "ping":
       return { pong: true, ts: Date.now() };
@@ -236,6 +236,70 @@ async function handleCommand(command, args) {
 }
 
 // ---------------------------------------------------------------------------
+// Multiplayer rules — several bots and humans share this browser
+// ---------------------------------------------------------------------------
+
+const DEFAULT_ACTOR = "_local";
+const ACTOR_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+// Commands an actor may send without naming a tab.
+const TABLESS_COMMANDS = new Set(["ping", "ghost_tab_list", "ghost_tab_open", "ghost_status"]);
+
+function isActorCall(args) {
+  return typeof args.actor_id === "string" && args.actor_id !== "";
+}
+
+function actorOf(args) {
+  return isActorCall(args) ? args.actor_id : DEFAULT_ACTOR;
+}
+
+function typedError(code, message) {
+  return new Error(`${code}: ${message}`);
+}
+
+// A human is looking at a tab when it is the selected tab of the focused window.
+async function humanIsViewing(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.active) return false;
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  return Boolean(win && win.focused);
+}
+
+async function refuseIfHumanViewing(args, tabId, code, what) {
+  if (isActorCall(args) && !args.human_ok && await humanIsViewing(tabId)) {
+    throw typedError(code, `A human is viewing tab ${tabId}; ${what}`);
+  }
+}
+
+// Chrome reports tab lifecycle problems as plain messages; give callers typed errors.
+function lifecycleError(err, tabId) {
+  const message = err && err.message ? err.message : String(err);
+  if (/^[A-Z_]+: /.test(message)) return err;
+  if (/No tab with id/i.test(message)) return typedError("TAB_NOT_FOUND", `Tab ${tabId ?? ""} does not exist or was closed`);
+  if (/tab was closed|Tabs cannot be edited/i.test(message)) return typedError("TAB_CLOSED", message);
+  if (/Frame with ID \d+ (was removed|is showing error page)|document was replaced/i.test(message)) {
+    return typedError("TAB_NAVIGATED", "The page changed during the call; read it again");
+  }
+  return err;
+}
+
+async function handleCommand(command, args) {
+  if (isActorCall(args)) {
+    if (!ACTOR_RE.test(args.actor_id)) throw typedError("INVALID_ACTOR", "actor_id must be 1-64 of A-Z a-z 0-9 _ . : -");
+    if (!TABLESS_COMMANDS.has(command) && !Number.isInteger(args.tab_id)) {
+      throw typedError("TAB_REQUIRED", `${command} needs tab_id when called by an actor`);
+    }
+    if (command === "ghost_tab_switch") {
+      throw typedError("FORBIDDEN_FOR_ACTOR", "Actors never change which tab a human sees");
+    }
+  }
+  try {
+    return await routeCommand(command, args);
+  } catch (err) {
+    throw lifecycleError(err, args.tab_id);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tab management
 // ---------------------------------------------------------------------------
 
@@ -256,7 +320,9 @@ async function tabList() {
 }
 
 async function tabOpen(args) {
-  const tab = await chrome.tabs.create({ url: args.url || "about:blank", active: args.active !== false });
+  // Actors open tabs in the background so the human's view never changes.
+  const active = isActorCall(args) ? false : args.active !== false;
+  const tab = await chrome.tabs.create({ url: args.url || "about:blank", active });
   return { id: tab.id, url: tab.url, title: tab.title };
 }
 
@@ -315,17 +381,20 @@ async function navigate(args) {
     tabId = active ? active.id : (await chrome.tabs.create({ url })).id;
   }
 
-  await chrome.tabs.update(tabId, { url, active: true });
-
-  // Wait for load
-  await waitForTabLoad(tabId, args.timeout || 30000);
+  const tab0 = await chrome.tabs.get(tabId);
+  if (tab0.url !== url) {
+    await refuseIfHumanViewing(args, tabId, "HUMAN_VIEWING", "ask them before navigating it away");
+    // Only a local, single-user call brings the tab to the front.
+    await chrome.tabs.update(tabId, isActorCall(args) ? { url } : { url, active: true });
+    await waitForTabLoad(tabId, args.timeout || 30000);
+  }
 
   const tab = await chrome.tabs.get(tabId);
 
   // If vacuum-style, also read the page
   if (args.command === "ghost_vacuum" || args.limit) {
-    const content = await readTabContent(tabId, args.limit || 30, args.selector);
-    return { id: tab.id, url: tab.url, title: tab.title, content };
+    const read = await readTabContent(tabId, args.limit || 30, args.selector, actorOf(args));
+    return { id: tab.id, url: tab.url, title: tab.title, content: read.text, snapshot: read.snapshot };
   }
 
   return { id: tab.id, url: tab.url, title: tab.title };
@@ -356,9 +425,9 @@ function waitForTabLoad(tabId, timeout = 30000) {
 
 async function readPage(args) {
   const tabId = await getActiveTabId(args);
-  const content = await readTabContent(tabId, args.max_chars || 4000, args.selector);
+  const read = await readTabContent(tabId, args.max_chars || 4000, args.selector, actorOf(args));
   const tab = await chrome.tabs.get(tabId);
-  return { url: tab.url, title: tab.title, content };
+  return { url: tab.url, title: tab.title, content: read.text, snapshot: read.snapshot };
 }
 
 async function fetchPdf(args) {
@@ -448,83 +517,29 @@ async function fetchPdf(args) {
   };
 }
 
-async function readTabContent(tabId, maxChars, selector) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (sel, max) => {
-      const el = sel ? document.querySelector(sel) : document.body;
-      if (!el) return { error: `Selector "${sel}" not found` };
+async function injectPageHelpers(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["ghost_page.js", "overlay.js"] });
+}
 
-      // Build a structured view of the page
-      const items = [];
-      let charCount = 0;
+// Run a function in the page's isolated world after the Ghost helpers are
+// loaded. Chrome serializes `func`; it must catch its own errors and return
+// {value} or {error}, because MV3 isolated worlds do not allow eval.
+async function runInPage(tabId, func, args) {
+  await injectPageHelpers(tabId);
+  const [result] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+  if (!result) throw new Error("The page did not answer");
+  if (result.result?.error) throw new Error(result.result.error);
+  return result.result?.value;
+}
 
-      function walk(node, depth) {
-        if (charCount >= max) return;
-
-        if (node.nodeType === Node.TEXT_NODE) {
-          const text = node.textContent.trim();
-          if (text) {
-            items.push(text);
-            charCount += text.length;
-          }
-          return;
-        }
-
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-        const tag = node.tagName.toLowerCase();
-
-        // Skip hidden, scripts, styles
-        if (["script", "style", "noscript", "svg"].includes(tag)) return;
-        const style = window.getComputedStyle(node);
-        if (style.display === "none" || style.visibility === "hidden") return;
-
-        // Clickable elements get numbered
-        const clickable = tag === "a" || tag === "button" || tag === "input" ||
-          tag === "select" || tag === "textarea" || node.getAttribute("role") === "button" ||
-          node.getAttribute("onclick") || node.getAttribute("tabindex");
-
-        if (clickable) {
-          const label = node.textContent.trim().slice(0, 100) || node.getAttribute("aria-label") ||
-            node.getAttribute("placeholder") || node.getAttribute("title") || tag;
-          const href = node.getAttribute("href") || "";
-          const type = node.getAttribute("type") || "";
-          // Current form values can contain credentials or session material.
-          // Enumerate the control, but never send its value to the agent.
-          const value = (tag === "input" || tag === "textarea") && node.value
-            ? "[REDACTED]"
-            : "";
-
-          // Store element reference for clicking
-          node.setAttribute("data-ghost-id", items.length);
-
-          let desc = `[${items.length}] `;
-          if (tag === "a") desc += `link: ${label}` + (href ? ` (${href.slice(0, 80)})` : "");
-          else if (tag === "input") desc += `input(${type}): ${value || label}`;
-          else if (tag === "select") desc += `select: ${label}`;
-          else if (tag === "textarea") desc += `textarea: ${value || label}`;
-          else desc += `${tag}: ${label}`;
-
-          items.push(desc);
-          charCount += desc.length;
-          return; // Don't recurse into clickable children
-        }
-
-        for (const child of node.childNodes) {
-          if (charCount >= max) break;
-          walk(child, depth + 1);
-        }
-      }
-
-      walk(el, 0);
-      return { text: items.join("\n"), length: items.length };
+async function readTabContent(tabId, maxChars, selector, actor) {
+  return runInPage(
+    tabId,
+    (actor, max, sel) => {
+      try { return { value: globalThis.__ghostPage.enumerate(actor, max, sel) }; } catch (err) { return { error: err.message }; }
     },
-    args: [selector || null, maxChars],
-  });
-
-  if (!results || !results[0]) throw new Error("Failed to read page");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
-  return results[0].result?.text || "";
+    [actor, maxChars, selector || null],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -533,48 +548,28 @@ async function readTabContent(tabId, maxChars, selector) {
 
 async function click(args) {
   const tabId = await getActiveTabId(args);
-  const choice = args.choice;
+  if (args.choice === undefined && !args.selector) throw new Error("Provide choice (number) or selector");
 
-  if (choice === undefined && !args.selector) throw new Error("Provide choice (number) or selector");
-
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (choice, selector) => {
-      let el;
-      if (selector) {
-        el = document.querySelector(selector);
-      } else {
-        el = document.querySelector(`[data-ghost-id="${choice}"]`);
+  const result = await runInPage(
+    tabId,
+    (actor, choice, selector, announce) => {
+      try {
+        const done = globalThis.__ghostPage.click(actor, choice, selector);
+        // Each actor action also moves that actor's ring to what it touched.
+        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        return { value: done };
+      } catch (err) {
+        return { error: err.message };
       }
-      if (!el) return { error: `Element not found: ${selector || `choice ${choice}`}` };
-
-      // Scroll into view
-      el.scrollIntoView({ behavior: "instant", block: "center" });
-
-      // Dispatch real events
-      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      el.click();
-
-      return {
-        clicked: true,
-        tag: el.tagName.toLowerCase(),
-        text: (el.textContent || "").trim().slice(0, 100),
-      };
     },
-    args: [choice, args.selector || null],
-  });
-
-  if (!results || !results[0]) throw new Error("Click failed");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
+    [actorOf(args), args.choice ?? null, args.selector || null, isActorCall(args)],
+  );
 
   // Wait for potential navigation
   if (args.wait) {
     await new Promise(r => setTimeout(r, args.wait === "networkidle" ? 2000 : (parseInt(args.wait) || 1000)));
   }
-
-  return results[0].result;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,32 +579,23 @@ async function click(args) {
 async function fill(args) {
   const tabId = await getActiveTabId(args);
   const { selector, choice, value } = args;
-
   if (!value && value !== "") throw new Error("value is required");
+  if (choice === undefined && !selector) throw new Error("Provide choice (number) or selector");
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (choice, selector, value) => {
-      let el;
-      if (selector) el = document.querySelector(selector);
-      else if (choice !== undefined) el = document.querySelector(`[data-ghost-id="${choice}"]`);
-      else el = document.activeElement;
-
-      if (!el) return { error: "Element not found" };
-
-      el.focus();
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return { filled: true, tag: el.tagName.toLowerCase() };
+  return runInPage(
+    tabId,
+    (actor, choice, selector, value, announce) => {
+      try {
+        // Focus-free: sets the value directly, so a human typing elsewhere keeps their cursor.
+        const done = globalThis.__ghostPage.fill(actor, choice, selector, value);
+        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        return { value: done };
+      } catch (err) {
+        return { error: err.message };
+      }
     },
-    args: [choice, selector || null, value],
-  });
-
-  if (!results || !results[0]) throw new Error("Fill failed");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
-  return results[0].result;
+    [actorOf(args), choice ?? null, selector || null, value, isActorCall(args)],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +604,27 @@ async function fill(args) {
 
 async function sendKey(args) {
   const tabId = await getActiveTabId(args);
+  const targeted = args.choice !== undefined || Boolean(args.selector);
+
+  // Text aimed at one element is written there without focus, like fill.
+  if (args.text && targeted) {
+    return runInPage(
+      tabId,
+      (actor, choice, selector, text, announce) => {
+        try {
+          const done = globalThis.__ghostPage.typeInto(actor, choice, selector, text);
+          if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+          return { value: done };
+        } catch (err) {
+          return { error: err.message };
+        }
+      },
+      [actorOf(args), args.choice ?? null, args.selector || null, args.text, isActorCall(args)],
+    );
+  }
+
+  // Untargeted keys go to whatever has focus, which may be the human's cursor.
+  await refuseIfHumanViewing(args, tabId, "HUMAN_ACTIVE", "target an element with choice or selector instead of the focused one");
 
   // If it's text to type, use a different approach
   if (args.text) {
@@ -774,6 +781,10 @@ async function screenshot(args) {
     : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
 
   if (!tab) throw new Error("No tab to screenshot");
+  if (!tab.active) {
+    // captureVisibleTab only sees the selected tab; capturing another would mean switching the human's view.
+    throw typedError("BACKGROUND_CAPTURE_UNSUPPORTED", `Tab ${tab.id} is not showing; Chrome can only capture the visible tab. Use ghost_read instead.`);
+  }
 
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
     format: args.format || "png",
@@ -789,6 +800,7 @@ async function screenshot(args) {
 
 async function scroll(args) {
   const tabId = await getActiveTabId(args);
+  await refuseIfHumanViewing(args, tabId, "HUMAN_ACTIVE", "scrolling would move their view");
   const direction = args.direction || "down";
   const amount = args.amount || 500;
 
@@ -842,7 +854,6 @@ async function wait(args) {
 
 async function showPresence(args) {
   const tabId = await getActiveTabId(args);
-  await chrome.scripting.executeScript({ target: { tabId }, files: ["overlay.js"] });
   const spec = {
     actor_id: args.actor_id,
     label: args.label,
@@ -855,10 +866,11 @@ async function showPresence(args) {
     selector: args.selector,
     text: args.text,
     rect: args.rect,
+    anchor: args.anchor,
   };
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (spec, clear) => {
+  const value = await runInPage(
+    tabId,
+    (spec, clear) => {
       try {
         const overlay = globalThis.__ghostOverlay;
         if (clear) return { value: overlay.clear(spec.actor_id) };
@@ -867,11 +879,9 @@ async function showPresence(args) {
         return { error: err.message };
       }
     },
-    args: [spec, Boolean(args.clear)],
-  });
-  if (!result) throw new Error("Show failed");
-  if (result.result?.error) throw new Error(result.result.error);
-  return { tab_id: tabId, ...result.result.value };
+    [spec, Boolean(args.clear)],
+  );
+  return { tab_id: tabId, ...value };
 }
 
 // ---------------------------------------------------------------------------

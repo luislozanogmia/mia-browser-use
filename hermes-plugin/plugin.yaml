@@ -40,3 +40,7 @@ config_schema:
     type: boolean
     required: false
     description: "Tell the model which web page the user has open (URL and title) before each turn. Defaults to true."
+  actor_id:
+    type: string
+    required: false
+    description: "Multiplayer identity of this agent (1-64 of A-Z a-z 0-9 _ . : -). When set, every call is tagged with it, must name a tab_id, and never changes the human's view."

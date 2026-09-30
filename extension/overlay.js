@@ -90,36 +90,72 @@
     return null;
   }
 
+  function elementAnchor(el, describe) {
+    return { describe, element: el, rect: () => (el.isConnected ? el.getBoundingClientRect() : null) };
+  }
+
+  function textAnchor(text, describe = "text") {
+    let range = findText(text);
+    if (!range) return null;
+    return {
+      describe,
+      rect: () => {
+        if (!range || !range.startContainer.isConnected) range = findText(text);
+        return range ? range.getBoundingClientRect() : null;
+      },
+    };
+  }
+
+  function rectAnchor(rect) {
+    const { x, y, w, h } = rect;
+    if (![x, y, w, h].every(Number.isFinite)) throw new Error("rect needs numeric x, y, w, h");
+    return { describe: "rect", rect: () => new DOMRect(x - scrollX, y - scrollY, w, h) };
+  }
+
   // An anchor turns a target into a viewport rect on every frame, so the ring
   // follows the element while the page scrolls or re-lays out.
   function makeAnchor(spec) {
+    if (spec.element instanceof Element) return elementAnchor(spec.element, "element");
     if (Number.isInteger(spec.choice)) {
-      const selector = `[data-ghost-id="${spec.choice}"]`;
-      if (!document.querySelector(selector)) throw new Error(`Element ${spec.choice} not found; vacuum or read the page first`);
-      return { describe: `#${spec.choice}`, rect: () => document.querySelector(selector)?.getBoundingClientRect() };
+      // The actor's own numbers, from its last read or vacuum of this page.
+      return elementAnchor(globalThis.__ghostPage.resolve(spec.actor_id, spec.choice), `#${spec.choice}`);
     }
     if (typeof spec.selector === "string" && spec.selector) {
-      if (!document.querySelector(spec.selector)) throw new Error(`Selector not found: ${spec.selector}`);
-      return { describe: spec.selector, rect: () => document.querySelector(spec.selector)?.getBoundingClientRect() };
+      const el = document.querySelector(spec.selector);
+      if (!el) throw new Error(`Selector not found: ${spec.selector}`);
+      return elementAnchor(el, spec.selector);
     }
     if (typeof spec.text === "string" && spec.text) {
-      let range = findText(spec.text);
-      if (!range) throw new Error("Text not found on the page");
-      return {
-        describe: "text",
-        rect: () => {
-          if (!range.startContainer.isConnected) range = findText(spec.text);
-          return range ? range.getBoundingClientRect() : null;
-        },
-      };
+      const anchor = textAnchor(spec.text);
+      if (!anchor) throw new Error("Text not found on the page");
+      return anchor;
     }
     if (spec.rect && typeof spec.rect === "object") {
       // Page coordinates, for canvas apps where there is no element to point at.
-      const { x, y, w, h } = spec.rect;
-      if (![x, y, w, h].every(Number.isFinite)) throw new Error("rect needs numeric x, y, w, h");
-      return { describe: "rect", rect: () => new DOMRect(x - scrollX, y - scrollY, w, h) };
+      return rectAnchor(spec.rect);
+    }
+    if (spec.anchor && typeof spec.anchor === "object") {
+      // A portable anchor published from another browser: try the most exact form first.
+      const { selector, text, rect } = spec.anchor;
+      const el = typeof selector === "string" && selector ? safeQuery(selector) : null;
+      if (el) return elementAnchor(el, "anchor");
+      const byText = typeof text === "string" && text ? textAnchor(text.slice(0, 120), "anchor") : null;
+      if (byText) return byText;
+      if (rect && typeof rect === "object") return rectAnchor(rect);
     }
     return { describe: "page", rect: () => null };
+  }
+
+  function safeQuery(selector) {
+    try { return document.querySelector(selector); } catch { return null; }
+  }
+
+  /** The portable form of where an actor is, for other people's browsers. */
+  function portable(spec, anchor, lastRect) {
+    if (anchor.element && globalThis.__ghostPage) return globalThis.__ghostPage.anchorOf(anchor.element);
+    if (typeof spec.text === "string" && spec.text) return { text: spec.text, rect: lastRect };
+    if (spec.anchor) return spec.anchor;
+    return lastRect ? { rect: lastRect } : null;
   }
 
   function makeNodes(spec) {
@@ -221,6 +257,11 @@
     if (!spec || typeof spec.actor_id !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(spec.actor_id)) {
       throw new Error("actor_id is required (1-64 of A-Z a-z 0-9 _ . : -)");
     }
+    const previous = actors.get(spec.actor_id)?.spec;
+    if (previous) {
+      // Keep the actor's look when an action only moves its target.
+      for (const key of ["label", "color", "owner_color", "kind"]) if (spec[key] === undefined) spec[key] = previous[key];
+    }
     const anchor = makeAnchor(spec);
     remove(spec.actor_id);
     const ttl = Number.isFinite(spec.ttl_ms) ? Math.max(1000, Math.min(spec.ttl_ms, 60 * 60 * 1000)) : DEFAULT_TTL_MS;
@@ -229,7 +270,10 @@
     reslot();
     render(entry);
     schedule();
-    return { actor_id: spec.actor_id, target: anchor.describe, rect: entry.lastRect, status: spec.status || "working" };
+    return {
+      actor_id: spec.actor_id, target: anchor.describe, rect: entry.lastRect, status: spec.status || "working",
+      anchor: portable(spec, anchor, entry.lastRect),
+    };
   }
 
   function clear(actorId) {

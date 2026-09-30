@@ -30,6 +30,7 @@ HERMES_COMMANDS = {
     "ghost_screenshot": "screenshot",
     "ghost_scroll": "scroll",
     "ghost_wait": "wait",
+    "ghost_show": "show",
 }
 
 

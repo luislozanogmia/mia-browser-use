@@ -20,6 +20,7 @@ provides_tools:
   - ghost_screenshot
   - ghost_scroll
   - ghost_wait
+  - ghost_show
 provides_hooks:
   - pre_llm_call
 config_schema:

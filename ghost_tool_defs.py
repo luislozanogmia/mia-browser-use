@@ -20,6 +20,22 @@ def _schema(properties=None, required=None):
     return value
 
 
+_SHOW_SCHEMA = _schema({
+    "actor_id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$"},
+    "label": {"type": "string", "maxLength": 80},
+    "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{3,8}$"},
+    "owner_color": {"type": "string", "pattern": "^#[0-9a-fA-F]{3,8}$"},
+    "kind": {"type": "string", "enum": ["bot", "human"]},
+    "status": {"type": "string", "enum": ["working", "done", "failed"]},
+    "choice": {"type": "integer"},
+    "selector": {"type": "string"},
+    "text": {"type": "string", "maxLength": 500},
+    "rect": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}, "required": ["x", "y", "w", "h"]},
+    "ttl_ms": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+    "clear": {"type": "boolean"},
+    "tab_id": {"type": "integer"},
+}, ["actor_id"])
+
 TOOLS = (
     ToolDef("ghost_status", "Check the active browser connection and page.", _schema()),
     ToolDef("ghost_tab_list", "List browser tabs.", _schema()),
@@ -36,6 +52,7 @@ TOOLS = (
     ToolDef("ghost_eval", "Run a JavaScript function in the current page and return its value.", _schema({"script": {"type": "string"}}, ["script"])),
     ToolDef("ghost_screenshot", "Capture the visible browser page.", _schema({"format": {"type": "string", "enum": ["png", "jpeg"]}, "quality": {"type": "integer", "minimum": 1, "maximum": 100}})),
     ToolDef("ghost_scroll", "Scroll the current page.", _schema({"direction": {"type": "string", "enum": ["up", "down", "top", "bottom"]}, "amount": {"type": "integer"}})),
+    ToolDef("ghost_show", "Show what you are working on: ring a numbered element, selector, text, or page rect with your mote and label. Shows only; it never edits the page.", _SHOW_SCHEMA),
     ToolDef("ghost_wait", "Wait for a selector or a bounded number of milliseconds.", _schema({"selector": {"type": "string"}, "ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "timeout": {"type": "integer", "minimum": 1, "maximum": 30000}})),
 )
 

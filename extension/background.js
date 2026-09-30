@@ -227,6 +227,9 @@ async function handleCommand(command, args) {
     case "ghost_wait":
       return wait(args);
 
+    case "ghost_show":
+      return showPresence(args);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -831,6 +834,44 @@ async function wait(args) {
   }
 
   throw new Error(`Timeout waiting for "${selector}" after ${timeout}ms`);
+}
+
+// ---------------------------------------------------------------------------
+// Presence overlay — show what an actor is working on, without editing
+// ---------------------------------------------------------------------------
+
+async function showPresence(args) {
+  const tabId = await getActiveTabId(args);
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["overlay.js"] });
+  const spec = {
+    actor_id: args.actor_id,
+    label: args.label,
+    color: args.color,
+    owner_color: args.owner_color,
+    kind: args.kind === "human" ? "human" : "bot",
+    status: args.status,
+    ttl_ms: args.ttl_ms,
+    choice: args.choice,
+    selector: args.selector,
+    text: args.text,
+    rect: args.rect,
+  };
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (spec, clear) => {
+      try {
+        const overlay = globalThis.__ghostOverlay;
+        if (clear) return { value: overlay.clear(spec.actor_id) };
+        return { value: { ...overlay.show(spec), showing: overlay.list() } };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    args: [spec, Boolean(args.clear)],
+  });
+  if (!result) throw new Error("Show failed");
+  if (result.result?.error) throw new Error(result.result.error);
+  return { tab_id: tabId, ...result.result.value };
 }
 
 // ---------------------------------------------------------------------------

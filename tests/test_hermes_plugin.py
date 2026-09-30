@@ -63,7 +63,7 @@ class HermesPluginTests(unittest.TestCase):
         self.assertIn("ghost_eval", context.tools)
         self.assertNotIn("ghost_" + "save_auth", context.tools)
         self.assertIn("ghost_pdf_read", context.tools)
-        self.assertEqual(len(context.tools), 16)
+        self.assertEqual(len(context.tools), 17)
 
     def test_page_context_hook_adds_open_page_for_local_sessions(self):
         module = load_plugin()

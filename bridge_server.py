@@ -17,6 +17,7 @@ import json
 import argparse
 import hashlib
 import hmac
+import re
 import secrets
 import signal
 import sys
@@ -52,6 +53,10 @@ from bridge_auth import (
 )
 from bridge_auth import _request_message
 from ghost_tool_defs import TOOL_NAMES
+from ghost_room import clean_language
+from reel_story import write_story
+from chat_store import ChatStore
+from ghost_chat import ChatHub
 
 try:
     import websockets
@@ -68,18 +73,38 @@ except ImportError:
 
 
 MAX_HTTP_BODY_BYTES = 1024 * 1024
+# One extension message: a cropped picture (up to 1 MiB as a data URL), a full-page
+# screenshot result, or the reel's digest for its PDF. The websockets default of
+# 1 MiB closed the connection on any of those.
+MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024
 WS_NONCE_BYTES = 32
-HTTP_COMMANDS = TOOL_NAMES | {"ping"}
+# room_* commands are answered by the bridge itself and are not model tools.
+ROOM_COMMANDS = {"ghost_room", "room_share", "room_unshare", "room_resolve", "room_ask_image", "room_report"}
+MAX_REPORT_CHARS = 200_000
+MAX_ASK_IMAGE_CHARS = 1024 * 1024  # a cropped area, as a JPEG data URL
+MAX_ASK_IMAGES = 20
+HTTP_COMMANDS = TOOL_NAMES | {"ping"} | ROOM_COMMANDS
+# Actor calls that don't touch a page produce no room activity.
+QUIET_COMMANDS = {"ghost_status", "ghost_tab_list", "ghost_tab_open", "ping"}
 MAX_PENDING_CHALLENGES = 1024
 MAX_INIT_NONCES = 4096
 
 
 class BridgeServer:
-    def __init__(self, port=9377, token=None, allow_eval=False):
+    def __init__(self, port=9377, token=None, allow_eval=False, room=None):
         self.port = port
+        # Optional RoomLink; without it Ghost is single-machine as before.
+        self.room = room
+        self.tab_urls = {}  # tab id -> url, from command results and tab events
+        # Pictures of cropped areas asked about here. They stay on this machine:
+        # the relay only carries the question and where the area is.
+        self.ask_images = {}
+        self.ask_threads = {}  # conversation -> the question whose picture it is about
+        self.bot_looks = {}  # actor id -> last label/color it showed
         self.token = token or load_bridge_token(create=True)
         self.extension_ws = None
         self.pending = {}  # id -> Future
+        self.story_busy = False  # one reel PDF written at a time
         self.pending_pdf_uploads = {}  # one-time token -> Future[bytes]
         self.connected = False
         self.allow_eval = allow_eval
@@ -87,6 +112,10 @@ class BridgeServer:
         self.instance_id = secrets.token_hex(16)
         self.http_challenges = {}
         self.http_init_nonces = {}
+        # Mia's side panel: its conversation, and the workers acting on tabs.
+        self.chat = ChatHub(self._chat_call, self._chat_push, self._chat_room,
+                            me=lambda: self.room.me["id"] if self.room else "", retire=self._chat_retire,
+                            store=ChatStore())
 
     # ------------------------------------------------------------------
     # WebSocket handler — Chrome extension connects here
@@ -149,6 +178,8 @@ class BridgeServer:
         self.extension_ws = websocket
         self.connected = True
         await websocket.send(json.dumps({"type": "authenticated"}))
+        if self.room:
+            await self._push_shared_pages()
 
         try:
             async for raw in websocket:
@@ -169,7 +200,27 @@ class BridgeServer:
                 # Response to a pending command
                 msg_id = msg.get("id")
                 if msg_id and msg_id in self.pending:
+                    self._remember_tab(msg.get("meta"))
                     self.pending[msg_id].set_result(msg)
+                    continue
+
+                # The reel asks for the words of its PDF; works with or without a room.
+                if msg.get("type") == "reel_story":
+                    asyncio.get_running_loop().create_task(self._reel_story(msg))
+                    continue
+
+                # Mia's side panel: messages, approvals and stops.
+                if msg.get("type") == "chat" and isinstance(msg.get("chat"), dict):
+                    print(f"[chat] from the panel: {str(msg['chat'].get('action'))[:20]}")
+                    asyncio.get_running_loop().create_task(self.chat.handle(msg["chat"]))
+                    continue
+
+                # Events the extension pushes for multiplayer
+                if msg.get("type") == "ask_cancel" and isinstance(msg.get("id"), str):
+                    asyncio.get_running_loop().create_task(self.chat.cancel_ask(msg["id"][:64]))
+                    continue
+                if msg.get("type") in {"human", "tab_ready", "share", "unshare", "resolve", "ask"}:
+                    asyncio.get_running_loop().create_task(self._extension_event(msg))
                     continue
 
         except websockets.ConnectionClosed:
@@ -192,7 +243,7 @@ class BridgeServer:
     async def send_command(self, command, args=None, timeout=60):
         if not self.connected or not self.extension_ws:
             raise Exception("NO_EXTENSION: Chrome extension is not connected. "
-                            "Install Ghost Bridge and click Connect.")
+                            "Install the Mia extension and click Connect.")
 
         msg_id = secrets.token_hex(8)
         future = asyncio.get_event_loop().create_future()
@@ -370,15 +421,338 @@ class BridgeServer:
             return self._signed_json_response(request, {"error": "'timeout' must be a number"}, status=400)
 
         try:
-            if command == "ghost_pdf_read":
-                result = await self.handle_pdf_read(args, timeout)
-                return self._signed_json_response(request, {"result": result})
-            result = await self.send_command(command, args, timeout)
-            if "error" in result:
-                return self._signed_json_response(request, {"error": result["error"]}, status=502)
-            return self._signed_json_response(request, {"result": result.get("result", result)})
+            ok, value = await self.execute(command, args, timeout)
+            if not ok:
+                return self._signed_json_response(request, {"error": value}, status=502)
+            return self._signed_json_response(request, {"result": value})
         except Exception as e:
             return self._signed_json_response(request, {"error": str(e)}, status=502)
+
+    async def execute(self, command, args, timeout):
+        """Run one authenticated command; returns (ok, result or error)."""
+        if command in ROOM_COMMANDS:
+            return True, await self.handle_room_command(command, args)
+        if command == "ghost_pdf_read":
+            return True, await self.handle_pdf_read(args, timeout)
+        if command == "ghost_suggest" and self.room and isinstance(args, dict):
+            ask = self.room.asks.get(args.get("reply_to"))
+            if ask and not any(args.get(k) is not None for k in ("choice", "selector", "text", "rect")):
+                # An answer goes where the question was asked.
+                args = {**args, "anchor": ask.get("target"), "tab_id": args.get("tab_id") or self._tab_for(ask.get("url")),
+                        "thread": ask.get("thread", ask["id"]), "href": ask.get("href", ""), "question": ask.get("question", "")}
+        call_id = secrets.token_hex(6)
+        await self._announce(command, args, call_id, "started")
+        result = await self.send_command(command, args, timeout)
+        if "error" in result:
+            await self._announce(command, args, call_id, "failed", error=result["error"])
+            return False, result["error"]
+        value = result.get("result", result)
+        await self._announce(command, args, call_id, "done", value=value)
+        return True, value
+
+    # ------------------------------------------------------------------
+    # Multiplayer: publish local actors, draw remote ones
+    # ------------------------------------------------------------------
+
+    def _tab_for(self, url):
+        from ghost_room import page_key
+
+        key = page_key(url)
+        return next((tab for tab, seen in self.tab_urls.items() if key and page_key(seen) == key), None)
+
+    def _remember_tab(self, meta):
+        if isinstance(meta, dict) and isinstance(meta.get("tab_id"), int) and isinstance(meta.get("url"), str):
+            self.tab_urls[meta["tab_id"]] = meta["url"]
+
+    async def _announce(self, command, args, call_id, status, value=None, error=None):
+        """Tell the room what an actor did: an activity event, and its presence."""
+        actor = args.get("actor_id") if isinstance(args, dict) else None
+        if not self.room or not isinstance(actor, str) or command in QUIET_COMMANDS:
+            return
+        if command == "ghost_show" and not args.get("clear"):
+            look = {k: args[k] for k in ("label", "color") if isinstance(args.get(k), str)}
+            self.bot_looks[actor] = {**self.bot_looks.get(actor, {}), **look}
+        await self.room.ensure_bot(actor, self.bot_looks.get(actor))
+        tab_id = args.get("tab_id")
+        url = (value or {}).get("url") if isinstance(value, dict) and command in {"ghost_navigate", "ghost_vacuum"} else None
+        url = url or self.tab_urls.get(tab_id)
+        if not self.room.is_shared(url):
+            return
+        anchor = value.get("anchor") if isinstance(value, dict) else None
+        if command not in {"ghost_show", "ghost_suggest"}:
+            await self.room.send({
+                "action": "activity", "actor_id": actor, "url": url, "call_id": call_id,
+                "op": command.removeprefix("ghost_"), "status": status, "target": anchor,
+                **({"error": str(error)[:200]} if error else {}),
+            })
+        if status != "done":
+            return
+        if command == "ghost_suggest":
+            await self.room.send({
+                "action": "suggest", "actor_id": actor, "url": url, "id": value.get("id"),
+                "title": args.get("title", ""), "body": args.get("body", ""), "target": anchor,
+                **{k: args[k] for k in ("kind", "reply_to") if isinstance(args.get(k), str)},
+            })
+        elif command == "ghost_show":
+            await self.room.send({
+                "action": "presence", "actor_id": actor, "url": url,
+                "status": "gone" if args.get("clear") else (args.get("status") or "working"),
+                "target": anchor, "label": args.get("label") or self.bot_looks.get(actor, {}).get("label", ""),
+                **({"ttl_ms": args["ttl_ms"]} if isinstance(args.get("ttl_ms"), int) else {}),
+            })
+        elif anchor:
+            await self.room.send({
+                "action": "presence", "actor_id": actor, "url": url, "status": "working",
+                "target": anchor, "label": self.bot_looks.get(actor, {}).get("label", ""),
+            })
+
+    async def _push_shared_pages(self):
+        if self.connected and self.extension_ws and self.room:
+            with suppress(Exception):
+                await self.extension_ws.send(json.dumps({
+                    "type": "shared_pages", "urls": list(self.room.shared), "me": self.room.me,
+                }))
+
+    async def _tabs_showing(self, url):
+        from ghost_room import page_key
+
+        key = page_key(url)
+        if not key or not self.connected:
+            return []
+        listing = await self.send_command("ghost_tab_list", {}, timeout=10)
+        tabs = (listing.get("result") or {}).get("tabs", [])
+        return [t["id"] for t in tabs if isinstance(t, dict) and page_key(t.get("url")) == key]
+
+    def _show_args(self, presence, tab_id):
+        actor = presence["actor"]
+        status = presence.get("status", "working")
+        args = {
+            "tab_id": tab_id,
+            "actor_id": actor["id"],
+            "kind": actor.get("kind", "bot"),
+            "label": presence.get("label") or actor.get("name") or actor["id"],
+            "status": status if status in {"working", "done", "failed"} else "done",
+            "ttl_ms": max(1000, min(int(presence.get("expires_at", 0)) - int(time.time() * 1000), 3600000)) if presence.get("expires_at") else 300000,
+        }
+        for key in ("color", "owner_color"):
+            if actor.get(key):
+                args[key] = actor[key]
+        if presence.get("target"):
+            args["anchor"] = presence["target"]
+        if presence.get("pointer"):
+            args["pointer"] = presence["pointer"]
+        return args
+
+    async def _draw(self, presence, tab_ids=None):
+        try:
+            tab_ids = tab_ids if tab_ids is not None else await self._tabs_showing(presence.get("url"))
+            for tab_id in tab_ids:
+                if presence.get("status") == "gone":
+                    await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": presence["actor"]["id"], "clear": True}, timeout=10)
+                else:
+                    await self.send_command("ghost_show", self._show_args(presence, tab_id), timeout=10)
+        except Exception as exc:
+            print(f"[room] could not draw {presence.get('actor', {}).get('id')}: {exc}")
+
+    async def _draw_suggestion(self, suggestion, tab_ids=None, clear=False):
+        try:
+            tab_ids = tab_ids if tab_ids is not None else await self._tabs_showing(suggestion.get("url"))
+            for tab_id in tab_ids:
+                args = {"tab_id": tab_id, "id": suggestion["id"], "clear": clear}
+                if not clear:
+                    args.update({
+                        "actor": suggestion["actor"], "title": suggestion.get("title", ""),
+                        "body": suggestion.get("body", ""), "anchor": suggestion.get("target"),
+                        "kind": suggestion.get("kind", "edit"), "question": suggestion.get("question", ""),
+                        "href": suggestion.get("href", ""), "thread": suggestion.get("thread", ""),
+                        "reply_to": suggestion.get("reply_to", ""), "text": suggestion.get("text", ""),
+                    })
+                await self.send_command("ghost_suggestion", args, timeout=10)
+        except Exception as exc:
+            print(f"[room] could not draw suggestion {suggestion.get('id')}: {exc}")
+
+    async def _draw_ask(self, ask, tab_ids=None, clear=False):
+        """A human's question shows as a card until a bot answers it."""
+        await self._draw_suggestion({
+            "id": ask["id"], "url": ask.get("url"), "actor": ask["by"], "kind": "ask",
+            "title": ask.get("question", ""), "body": "", "target": ask.get("target"), "href": ask.get("href", ""),
+            "thread": ask.get("thread", ""), "text": ask.get("text", ""),
+        }, tab_ids, clear)
+
+    async def on_room_message(self, message):
+        """Called by RoomLink for everything the room sends."""
+        kind = message.get("type")
+        if kind in {"joined", "page"}:
+            await self._push_shared_pages()
+            if kind == "page" and message.get("event") == "shared":
+                for tab_id in await self._tabs_showing(message["page"]["url"]):
+                    await self._extension_event({"type": "tab_ready", "tab_id": tab_id, "url": message["page"]["url"]})
+            if kind == "joined":
+                for presence in list(self.room.presence.values()):
+                    await self._draw(presence)
+                for suggestion in list(self.room.suggestions.values()):
+                    await self._draw_suggestion(suggestion)
+                for ask in list(self.room.asks.values()):
+                    await self._draw_ask(ask)
+        elif kind == "presence" and not self.room._mine(message["actor"]):
+            await self._draw(message)
+        elif kind == "member" and message.get("event") == "left":
+            for tab_id, url in list(self.tab_urls.items()):
+                if self.room.is_shared(url):
+                    with suppress(Exception):
+                        await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": message["actor"]["id"], "clear": True}, timeout=10)
+        elif kind == "suggestion":
+            if message.get("reply_to"):
+                await self._draw_ask({"id": message["reply_to"], "url": message.get("url"), "by": message["actor"]}, clear=True)
+            await self._draw_suggestion(message)
+        elif kind == "ask":
+            await self._draw_ask(message)
+            print(f"[room] {message['by']['id']} asked: {message['question']}")
+        elif kind == "resolved":
+            await self._draw_suggestion(message, clear=True)
+            print(f"[room] {message['by']['id']} {message['decision']}ed suggestion {message['id']} from {message['actor']['id']}")
+        elif kind == "error":
+            print(f"[room] {message.get('code')}: {message.get('message')}")
+
+    async def _reel_story(self, msg):
+        """A model writes the reel's booklet; the answer goes back to the reel page."""
+        story_id = msg.get("id")
+        if not isinstance(story_id, str) or not re.fullmatch(r"[A-Za-z0-9]{1,32}", story_id):
+            return
+        moments = msg.get("moments") if isinstance(msg.get("moments"), list) else []
+        if self.story_busy:
+            reply = {"id": story_id, "error": "A PDF is already being written; try again in a moment."}
+        else:
+            self.story_busy = True
+            try:
+                story = await asyncio.to_thread(write_story, moments, clean_language(msg.get("language")))
+                reply = {"id": story_id, "story": story}
+            except Exception as exc:  # the reel falls back to a plain layout
+                reply = {"id": story_id, "error": str(exc)[:200] or "The model did not answer"}
+            finally:
+                self.story_busy = False
+        with suppress(Exception):
+            await self.send_command("ghost_reel_story", reply, timeout=10)
+
+    async def _chat_call(self, command, args):
+        """A chat worker's browser call: the same path, checks and room announcements as any actor."""
+        if command == "ghost_eval":
+            return False, "ghost_eval is never available to chat workers"
+        return await self.execute(command, args, 45)
+
+    async def _chat_retire(self, actor_id):
+        if self.room:
+            await self.room.retire_bot(actor_id)
+
+    async def _chat_push(self, state):
+        await self.send_command("ghost_chat_state", state, timeout=10)
+
+    def _chat_room(self):
+        if not self.room:
+            return None
+        look = lambda a: {"name": str(a.get("name") or a.get("id", ""))[:40], "color": a.get("color", ""),
+                          "kind": a.get("kind", "human")}
+        return {"name": self.room.room, "connected": self.room.connected, "me": look(self.room.me),
+                "members": [look(a) for a in list(self.room.members.values())[:30]]}
+
+    async def _extension_event(self, msg):
+        """Things the extension tells the bridge without being asked."""
+        if not self.room:
+            return
+        kind = msg.get("type")
+        tab_id, url = msg.get("tab_id"), msg.get("url")
+        if isinstance(tab_id, int) and isinstance(url, str):
+            self.tab_urls[tab_id] = url
+        if kind == "tab_ready" and self.room.is_shared(url):
+            for presence in self.room.presence_for(url):
+                await self._draw(presence, [tab_id])
+            for suggestion in self.room.suggestions_for(url):
+                await self._draw_suggestion(suggestion, [tab_id])
+            for ask in self.room.asks_for(url):
+                await self._draw_ask(ask, [tab_id])
+        elif kind == "human" and self.room.is_shared(url):
+            await self.room.send({
+                "action": "presence", "actor_id": self.room.me["id"], "url": url,
+                "status": msg.get("status") if msg.get("status") in {"working", "idle"} else "working",
+                "target": msg.get("focus"), "pointer": msg.get("pointer"), "label": self.room.me.get("name", ""),
+            })
+        elif kind == "share" and isinstance(url, str):
+            await self.room.send({"action": "share", "page": {"url": url, "title": str(msg.get("title", ""))[:200]}})
+        elif kind == "unshare" and isinstance(url, str):
+            await self.room.send({"action": "unshare", "url": url})
+        elif kind == "resolve" and msg.get("decision") in {"accept", "reject"} and isinstance(msg.get("id"), str):
+            await self.room.send({"action": "resolve", "id": msg["id"], "decision": msg["decision"]})
+        elif kind == "ask" and self.room.is_shared(url) and isinstance(msg.get("question"), str):
+            aid = secrets.token_hex(6)
+            thread = msg.get("thread") if isinstance(msg.get("thread"), str) else None
+            image = msg.get("image")
+            if isinstance(image, str) and image.startswith("data:image/jpeg;base64,") and len(image) <= MAX_ASK_IMAGE_CHARS:
+                self.ask_images[aid] = image
+                self.ask_threads[thread or aid] = aid
+            elif thread and self.ask_threads.get(thread) in self.ask_images:
+                # A follow-up is about the same cropped area: the same picture, by reference.
+                self.ask_images[aid] = self.ask_images[self.ask_threads[thread]]
+            while len(self.ask_images) > MAX_ASK_IMAGES:
+                self.ask_images.pop(next(iter(self.ask_images)))
+            while len(self.ask_threads) > MAX_ASK_IMAGES:
+                self.ask_threads.pop(next(iter(self.ask_threads)))
+            ask = {
+                "action": "ask", "id": aid, "url": url, "question": msg["question"][:600],
+                "text": str(msg.get("text", ""))[:4000], "target": msg.get("target"),
+                **({"thread": msg["thread"]} if isinstance(msg.get("thread"), str) else {}),
+                "links": msg.get("links") if isinstance(msg.get("links"), list) else [],
+                **({"language": msg["language"]} if isinstance(msg.get("language"), str) else {}),
+            }
+            await self.room.send(ask)
+            # The tab's agent answers its own person's question (see ChatHub.explain).
+            if isinstance(tab_id, int) and not isinstance(tab_id, bool):
+                await self.chat.explain({**ask, "image": aid in self.ask_images}, tab_id, url)
+
+    async def handle_room_command(self, command, args):
+        if not self.room:
+            raise Exception("NO_ROOM: start the bridge with --room to use multiplayer")
+        if command == "ghost_room":
+            wait_ms = args.get("wait_ms") if isinstance(args, dict) else None
+            if isinstance(wait_ms, int) and not isinstance(wait_ms, bool) and wait_ms > 0 and not self.room.asks:
+                # Long-poll: a bot waiting for a question, or for a page to be shared or unshared.
+                self.room.changed.clear()
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.room.changed.wait(), min(wait_ms, 50000) / 1000)
+            mine = set(self.room.bots) | {self.room.me["id"]}
+            return {
+                "connected": self.room.connected, "room": self.room.room, "me": self.room.me,
+                "members": list(self.room.members.values()), "shared_pages": list(self.room.shared.values()),
+                "presence": list(self.room.presence.values()), "suggestions": list(self.room.suggestions.values()),
+                "asks": [{**a, "image": True} if a.get("id") in self.ask_images else a for a in self.room.asks.values()],
+                "decisions_on_your_suggestions": [d for d in self.room.decisions.values() if d["actor"]["id"] in mine],
+            }
+        if command in {"room_share", "room_unshare"}:
+            url = args.get("url")
+            if not isinstance(url, str):
+                raise Exception("url is required")
+            if command == "room_share":
+                await self.room.send({"action": "share", "page": {"url": url, "title": str(args.get("title", ""))[:200]}})
+            else:
+                await self.room.send({"action": "unshare", "url": url})
+            return {"sent": True}
+        if command == "room_report":
+            # A bot's long write-up of the session: it goes to this browser's reel.
+            title, markdown = args.get("title"), args.get("markdown")
+            if not isinstance(markdown, str) or not markdown.strip():
+                raise Exception("markdown is required")
+            return await self.send_command("ghost_reel_add", {
+                "kind": "report", "title": str(title or "Session report")[:200],
+                "markdown": markdown[:MAX_REPORT_CHARS], "by": str(args.get("by", ""))[:64],
+            }, timeout=15)
+        if command == "room_ask_image":
+            image = self.ask_images.get(args.get("id")) if isinstance(args, dict) else None
+            if not image:
+                raise Exception("NOT_FOUND: no picture for that question on this bridge")
+            return {"id": args["id"], "image": image}
+        if command == "room_resolve":
+            await self.room.send({"action": "resolve", "id": args.get("id"), "decision": args.get("decision")})
+            return {"sent": True}
+        raise Exception(f"Unknown room command {command}")
 
     async def handle_pdf_upload(self, request):
         """Accept one bounded upload created for a single ghost_pdf_read call."""
@@ -505,14 +879,19 @@ class BridgeServer:
     # Run
     # ------------------------------------------------------------------
 
-    async def run(self):
-        # WebSocket server for the extension
-        ws_server = await ws_serve(
+    async def serve_extension(self, port=None):
+        """The WebSocket server the extension connects to (loopback only)."""
+        return await ws_serve(
             self.ws_handler,
             "127.0.0.1",
-            self.port,
+            self.port if port is None else port,
+            max_size=MAX_WS_MESSAGE_BYTES,
             # Serve the WS on /ghost-bridge path
         )
+
+    async def run(self):
+        # WebSocket server for the extension
+        ws_server = await self.serve_extension()
 
         # HTTP server for agent commands
         app = web.Application(client_max_size=MAX_HTTP_BODY_BYTES)
@@ -531,6 +910,10 @@ class BridgeServer:
         print(f"[bridge] HTTP API on http://127.0.0.1:{self.port + 1}/call")
         print(f"[bridge] Pair the extension with the token stored at {token_path()}")
         print(f"[bridge] Waiting for Chrome extension...")
+        if self.room:
+            self.room.on_message = self.on_room_message
+            self.room.start()
+            print(f"[bridge] Joining room {self.room.room} at {self.room.url} as {self.room.me['id']}")
 
         # Wait forever
         stop = asyncio.get_event_loop().create_future()
@@ -548,6 +931,8 @@ class BridgeServer:
         try:
             await stop
         finally:
+            if self.room:
+                await self.room.stop()
             ws_server.close()
             await ws_server.wait_closed()
             await runner.cleanup()

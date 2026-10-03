@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mia</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="top">
+    <button class="room-pill" id="room" hidden></button>
+    <span class="faces" id="faces"></span>
+    <span class="conn" id="conn" title="Not connected"></span>
+    <button class="icon" id="openHistory" title="Past chats" aria-label="Past chats" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
+    </button>
+    <button class="icon" id="newChat" title="New chat" aria-label="New chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="icon" id="openSettings" title="Settings" aria-label="Settings" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <section class="settings" id="settings" hidden>
+    <div class="card status-card">
+      <span class="dot" id="dot"></span>
+      <div><strong id="statusLabel">Disconnected</strong><small id="statusDetail">Not connected to the bridge</small></div>
+    </div>
+
+    <div id="setup">
+      <label class="field">Port <input type="number" id="port" value="9377" min="1024" max="65535"></label>
+      <label class="field">Pairing token
+        <input type="password" id="token" autocomplete="off" placeholder="Leave empty to pair automatically"></label>
+      <button class="wide primary" id="connectBtn">Connect</button>
+    </div>
+    <p class="error" id="error"></p>
+
+    <div id="roomBox">
+      <p class="section-label" id="roomLabel"></p>
+      <button class="wide share" id="shareBtn">Share this tab with the room</button>
+      <button class="wide" id="unshareBtn">Stop sharing this tab</button>
+      <label class="check"><input type="checkbox" id="followMe">
+        <span>Follow me<small>Bots come with you: the tab you're on is shared with the room as you move. Everyone in the room sees those pages.</small></span></label>
+      <label class="check"><input type="checkbox" id="reelMode">
+        <span>Reel mode<small>Every shared page you visit and every answer a bot gives is saved as a screenshot, one below the other.</small></span></label>
+      <label class="check"><input type="checkbox" id="immersive">
+        <span>Immersive mode<small>Drag anywhere on a shared page to ask about it, again and again. Clicks and scrolling still work. Esc pauses.</small></span></label>
+      <label class="check"><input type="checkbox" id="skipPrompt">
+        <span>Skip the question<small>Crop or select text and the bot explains it right away, no question box.</small></span></label>
+      <button class="wide" id="openReel">Open the reel</button>
+    </div>
+
+    <label class="field">Language<small>Mia and the bots reply in this language.</small>
+      <input type="text" id="language" list="languages" maxlength="40" placeholder="English" autocomplete="off"></label>
+    <datalist id="languages">
+      <option value="English"><option value="Español"><option value="Português"><option value="Français">
+      <option value="Deutsch"><option value="Italiano"><option value="中文"><option value="日本語"><option value="한국어">
+    </datalist>
+
+    <button class="wide" id="disconnectBtn">Disconnect</button>
+    <button class="wide primary" id="closeSettings">Back to the chat</button>
+    <p class="version" id="version"></p>
+  </section>
+
+  <section class="history" id="history" hidden>
+    <p class="section-label first">Past chats</p>
+    <div id="chatList"></div>
+    <button class="wide primary" id="closeHistory">Back to the chat</button>
+  </section>
+
+  <main id="log" aria-live="polite">
+    <section class="hello" id="hello">
+      <span class="mote mia-mark big" aria-hidden="true"></span>
+      <h1>Hi, I'm Mia</h1>
+      <p><b>Ask</b> about the page you're on, or switch to <b>Do</b> and tell me what to do on it.
+        I'll stop and ask before anything that sends, posts or buys.</p>
+    </section>
+  </main>
+
+  <section class="tasks" id="tasks" hidden>
+    <div class="tasks-head">
+      <button class="tasks-toggle" id="tasksToggle" aria-expanded="false" aria-controls="taskRows">
+        <strong>Bots</strong><span id="taskSum"></span><span class="chev" aria-hidden="true">›</span>
+      </button>
+      <button class="icon" id="stopAll" title="Stop all" aria-label="Stop all tasks">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      </button>
+    </div>
+    <div id="taskRows" hidden></div>
+  </section>
+
+  <div class="claude-bar" id="claudeBar" hidden>
+    <p id="claudeText"></p>
+    <button id="claudeBtn"></button>
+  </div>
+
+  <div id="approvals"></div>
+
+  <footer class="composer">
+    <div class="chips" id="chips"></div>
+    <textarea id="input" rows="2" placeholder="Ask, or tell Mia what to do on this page"></textarea>
+    <div class="controls">
+      <select id="model" aria-label="Model"></select>
+      <button class="send" id="send" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    <p class="status" id="status"></p>
+  </footer>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

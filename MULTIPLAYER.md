@@ -6,7 +6,7 @@ Mia Multiplayer problem statement.
 
 ## What the code does today
 
-Checked against ghost-cli `b5c4a3a` and the Mia host in
+Checked against mia-browser-use `b5c4a3a` and the Mia host in
 `mia-wt-multiplayer/macos/src/browser.cjs` + `mia-ghost-bridge.cjs`.
 
 | Claim in the problem statement | Verdict |

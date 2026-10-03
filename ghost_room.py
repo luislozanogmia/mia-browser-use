@@ -13,16 +13,20 @@ Gateway WebSockets + Lambda by swapping `MemoryRoomStore` for a shared store.
 Client -> room (the `action` field is the API Gateway route key):
     join      {room, key, actor}             first message on a connection
     actor     {actor}                        add a bot run from this machine
+    retire    {actor_id}                     that bot leaves (its tab closed, or it was dismissed)
     share     {page: {url, title}}           make a page visible to the room
     unshare   {url}
     presence  {actor_id, url, target, pointer, label, status, ttl_ms}
     activity  {actor_id, url, call_id, op, status, target, error}   op: fill, click, ...
-    suggest   {actor_id, url, id, target, title, body}
-    resolve   {id, decision: accept|reject}
+    suggest   {actor_id, url, id, target, title, body, kind: edit|note, reply_to}
+    resolve   {id, decision: accept|reject}      edits only; notes need no decision
+    ask       {url, id, target, text, question, thread?, links, language}
+              a human asks the bots about a selection; thread = the first ask of a conversation
+              (the room fills a follow-up's text and target from it and adds its earlier turns)
     leave     {}
 
 Room -> client: joined, member, page, presence, activity, suggestion,
-resolved, error. Everything a client sends is untrusted and re-validated here.
+resolved, ask, error. A suggestion with reply_to answers that ask and closes it. Everything a client sends is untrusted and re-validated here.
 """
 
 from __future__ import annotations
@@ -33,15 +37,21 @@ import json
 import re
 import secrets
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
-MAX_MESSAGE_BYTES = 16 * 1024
+# A question can carry 4000 chars of selected text, 8 links and an anchor: about 20 KB.
+MAX_MESSAGE_BYTES = 32 * 1024
 MAX_MEMBERS_PER_ROOM = 64
 MAX_ACTORS_PER_CONNECTION = 16
 MAX_PAGES_PER_ROOM = 32
-MAX_SUGGESTIONS_PER_ROOM = 200
+MAX_SUGGESTIONS_PER_ROOM = 200  # open edits waiting for a decision
+MAX_ASKS_PER_ROOM = 200  # open questions
+MAX_KEPT = 1000  # answered questions and notes kept for history, oldest dropped first
+MAX_SNAPSHOT_NOTES = 100  # notes a newcomer gets on join
+MAX_THREAD_TURNS = 10  # earlier turns a follow-up carries to the bots
 DEFAULT_PRESENCE_TTL_MS = 5 * 60 * 1000
 MAX_PRESENCE_TTL_MS = 60 * 60 * 1000
 RATE_LIMIT_PER_SECOND = 30
@@ -51,6 +61,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 KINDS = {"human", "bot"}
 STATUSES = {"working", "done", "failed", "idle", "gone"}
+SUGGESTION_KINDS = {"edit", "note"}
 ACTIVITY_STATUSES = {"started", "done", "failed"}
 
 
@@ -117,6 +128,36 @@ def clean_rect(value: Any) -> Optional[dict]:
     return rect if all(v is not None for v in rect.values()) else None
 
 
+def page_href(url: Any, key: str) -> str:
+    """The exact address a question was asked on (with its query, without the fragment).
+
+    Single-page apps (a YouTube search) change the query without loading a new page;
+    the question belongs to that address, not to every address with the same path."""
+    if not isinstance(url, str) or page_key(url) != key:
+        return key
+    return url.split("#", 1)[0][:2000]
+
+
+def clean_language(value: Any) -> str:
+    """The language the asker wants answers in: a name, nothing that reads as an instruction."""
+    text = " ".join(value.split())[:40] if isinstance(value, str) else ""
+    ok = text[:1].isalpha() and all(
+        unicodedata.category(ch)[0] in "LM" or ch in " ()-" for ch in text)
+    return text if ok else "English"
+
+
+def clean_links(value: Any) -> list[dict]:
+    """Links inside what was asked about, so a bot can open them when asked to."""
+    links = []
+    for item in value if isinstance(value, list) else []:
+        href = item.get("href") if isinstance(item, dict) else None
+        if isinstance(href, str) and re.match(r"^https?://[^\s]{1,990}$", href):
+            links.append({"href": href, "text": _text(item.get("text"), 200)})
+        if len(links) == 8:
+            break
+    return links
+
+
 def clean_anchor(value: Any) -> Optional[dict]:
     """A target another browser can find: selector, text snippet, page rect, or a sheet range."""
     if not isinstance(value, dict):
@@ -124,12 +165,20 @@ def clean_anchor(value: Any) -> Optional[dict]:
     anchor: dict[str, Any] = {}
     if isinstance(value.get("selector"), str) and value["selector"]:
         anchor["selector"] = value["selector"][:512]
-    text = _text(value.get("text"), 200)
+    text = _text(value.get("text"), 500)
     if text:
         anchor["text"] = text
+        # A long selection is found by where it starts (text) and where it ends.
+        end = _text(value.get("end"), 200)
+        if end:
+            anchor["end"] = end
     rect = clean_rect(value.get("rect"))
     if rect:
         anchor["rect"] = rect
+    # An area inside the selected element (a cropped part of the page), relative to its corner.
+    offset = clean_rect(value.get("offset")) if anchor.get("selector") else None
+    if offset:
+        anchor["offset"] = offset
     if isinstance(value.get("range"), str) and re.match(r"^[A-Za-z0-9!:$' ._-]{1,64}$", value["range"]):
         anchor["range"] = value["range"]
     return anchor or None
@@ -183,6 +232,7 @@ class Room:
     pages: dict[str, dict] = field(default_factory=dict)  # page key -> {url, title, by}
     presence: dict[str, dict] = field(default_factory=dict)  # actor id -> last presence
     suggestions: dict[str, dict] = field(default_factory=dict)  # id -> suggestion
+    asks: dict[str, dict] = field(default_factory=dict)  # id -> a human's question
 
 
 class MemoryRoomStore:
@@ -255,6 +305,30 @@ class RoomHub:
         now = self._now_ms()
         for actor_id in [a for a, p in room.presence.items() if p["expires_at"] <= now]:
             del room.presence[actor_id]
+
+    @staticmethod
+    def _prune(room: Room) -> None:
+        """Keep history bounded: the oldest answered questions and notes go first; open edits stay."""
+        for aid in [a for a, ask in room.asks.items() if ask["state"] != "open"][:max(0, len(room.asks) - MAX_KEPT)]:
+            del room.asks[aid]
+        done = [s for s, sug in room.suggestions.items() if sug["state"] != "open" or sug["kind"] == "note"]
+        for sid in done[:max(0, len(room.suggestions) - MAX_KEPT)]:
+            del room.suggestions[sid]
+
+    @staticmethod
+    def _thread_turns(room: Room, thread: str) -> list[dict]:
+        """What was asked and answered so far in one conversation, oldest first."""
+        answers = {s["reply_to"]: s for s in room.suggestions.values() if s.get("reply_to")}
+        turns = []
+        for ask in room.asks.values():
+            if ask.get("thread", ask["id"]) != thread:
+                continue
+            answer = answers.get(ask["id"])
+            turns.append({
+                "question": ask["question"],
+                "answer": " ".join(t for t in (answer["title"], answer["body"]) if t)[:600] if answer else "",
+            })
+        return turns[-MAX_THREAD_TURNS:]
 
     def _register_actor(self, room: Room, member: Member, actor: dict) -> None:
         for other in room.members.values():
@@ -337,7 +411,10 @@ class RoomHub:
             "members": [a for m in room.members.values() for a in m.actors.values()],
             "pages": list(room.pages.values()),
             "presence": list(room.presence.values()),
-            "suggestions": [s for s in room.suggestions.values() if s["state"] == "open"],
+            # Edits waiting for a decision, and the latest notes (answers); all of them would not fit a message.
+            "suggestions": [s for s in room.suggestions.values() if s["state"] == "open" and s["kind"] == "edit"]
+            + [s for s in room.suggestions.values() if s["kind"] == "note"][-MAX_SNAPSHOT_NOTES:],
+            "asks": [a for a in room.asks.values() if a["state"] == "open"],
         }
         return [(conn_id, snapshot)] + self._to_others(room, conn_id, {"type": "member", "event": "joined", "actor": actor})
 
@@ -346,6 +423,17 @@ class RoomHub:
         actor = clean_actor(message.get("actor"))
         self._register_actor(room, member, actor)
         return self._to_all(room, {"type": "member", "event": "joined", "actor": actor})
+
+    def _on_retire(self, conn_id: str, message: dict) -> Outbound:
+        room, member = self._member(conn_id)
+        actor_id = _ident(message.get("actor_id"), "actor_id")
+        actor = member.actors.get(actor_id)
+        # Only a bot of this connection; the person it joined as leaves with "leave".
+        if not actor or actor_id == next(iter(member.actors)):
+            raise RoomError("NOT_FOUND", "No bot of yours with that id")
+        del member.actors[actor_id]
+        room.presence.pop(actor_id, None)
+        return self._to_all(room, {"type": "member", "event": "left", "actor": actor})
 
     def _on_share(self, conn_id: str, message: dict) -> Outbound:
         room, member = self._member(conn_id)
@@ -417,28 +505,94 @@ class RoomHub:
         actor = self._owned_actor(member, message.get("actor_id"))
         key, _page = self._shared_page(room, message.get("url"))
         sid = _ident(message.get("id") or secrets.token_hex(6), "id")
-        open_count = sum(1 for s in room.suggestions.values() if s["state"] == "open")
-        if sid not in room.suggestions and open_count >= MAX_SUGGESTIONS_PER_ROOM:
+        reply_to = message.get("reply_to")
+        ask = None
+        if reply_to is not None:
+            ask = room.asks.get(_ident(reply_to, "reply_to"))
+            earlier = room.suggestions.get(sid)
+            # The same actor may rewrite its own answer, e.g. "On it" becoming what it did.
+            rewrite = bool(ask and earlier and earlier.get("reply_to") == ask["id"] and earlier["actor"] == actor)
+            if not ask or (ask["state"] != "open" and not rewrite):
+                raise RoomError("NOT_FOUND", "No open question with that id")
+        kind = message.get("kind") or ("note" if ask else "edit")
+        if kind not in SUGGESTION_KINDS:
+            raise RoomError("INVALID", "kind must be edit or note")
+        # Only edits wait for a decision; notes (answers) are history, pruned when old, never refused.
+        open_edits = sum(1 for s in room.suggestions.values() if s["state"] == "open" and s["kind"] == "edit")
+        if kind == "edit" and sid not in room.suggestions and open_edits >= MAX_SUGGESTIONS_PER_ROOM:
             raise RoomError("LIMIT", "Too many open suggestions")
         suggestion = {
             "type": "suggestion",
             "id": sid,
+            "kind": kind,
             "actor": actor,
             "url": key,
-            "target": clean_anchor(message.get("target")),
+            "target": clean_anchor(message.get("target")) or (ask["target"] if ask else None),
             "title": _text(message.get("title"), 120),
             "body": _text(message.get("body"), 600),
             "state": "open",
             "ts": self._now_ms(),
         }
+        if ask:
+            # The answer replaces the question on everyone's page.
+            ask["state"] = "answered"
+            suggestion["reply_to"] = ask["id"]
+            suggestion["question"] = ask["question"]
+            if ask.get("href"):
+                suggestion["href"] = ask["href"]
+            suggestion["thread"] = ask.get("thread", ask["id"])
+            # What the question was about, so a card rebuilt from this answer (after a
+            # reload, or on a machine that joined late) can carry it into a follow-up.
+            suggestion["text"] = ask.get("text", "")
         room.suggestions[sid] = suggestion
+        self._prune(room)
         return self._to_all(room, suggestion)
+
+    def _on_ask(self, conn_id: str, message: dict) -> Outbound:
+        room, member = self._member(conn_id)
+        humans = [a for a in member.actors.values() if a["kind"] == "human"]
+        if not humans:
+            raise RoomError("FORBIDDEN", "Only a human can ask")
+        key, _page = self._shared_page(room, message.get("url"))
+        question = _text(message.get("question"), 600)
+        if not question:
+            raise RoomError("INVALID", "question is required")
+        aid = _ident(message.get("id") or secrets.token_hex(6), "id")
+        if aid in room.asks or aid in room.suggestions:
+            raise RoomError("INVALID", "id is already used")
+        if sum(1 for a in room.asks.values() if a["state"] == "open") >= MAX_ASKS_PER_ROOM:
+            raise RoomError("LIMIT", "Too many open questions")
+        # A follow-up joins the conversation its first question started. It is about the
+        # same selection: a card rebuilt after a reload may not carry the text, so the
+        # thread's first question fills it in, with what was asked and answered since.
+        thread = _ident(message["thread"], "thread") if message.get("thread") else aid
+        first = room.asks.get(thread) if thread != aid else None
+        ask = {
+            "type": "ask",
+            "id": aid,
+            "by": humans[0],
+            "url": key,
+            "target": clean_anchor(message.get("target")) or (first["target"] if first else None),
+            "text": _text(message.get("text"), 4000) or (first["text"] if first else ""),
+            "question": question,
+            "href": page_href(message.get("url"), key),
+            "thread": thread,
+            "links": clean_links(message.get("links")) or (first["links"] if first else []),
+            "language": clean_language(message.get("language")),
+            "state": "open",
+            "ts": self._now_ms(),
+        }
+        if first:
+            ask["turns"] = self._thread_turns(room, thread)
+        room.asks[aid] = ask
+        self._prune(room)
+        return self._to_all(room, ask)
 
     def _on_resolve(self, conn_id: str, message: dict) -> Outbound:
         room, member = self._member(conn_id)
         sid = _ident(message.get("id"), "id")
         suggestion = room.suggestions.get(sid)
-        if not suggestion or suggestion["state"] != "open":
+        if not suggestion or suggestion["state"] != "open" or suggestion.get("kind") == "note":
             raise RoomError("NOT_FOUND", "No open suggestion with that id")
         decision = message.get("decision")
         if decision not in {"accept", "reject"}:

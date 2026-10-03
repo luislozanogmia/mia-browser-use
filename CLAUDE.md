@@ -1,6 +1,6 @@
-# Ghost CLI contributor guide
+# Mia Browser Use contributor guide
 
-Ghost has two supported browser targets:
+Mia Browser Use has two supported browser targets:
 
 1. the authenticated Chrome extension bridge; and
 2. the authenticated Hermes Desktop browser endpoint.
@@ -13,13 +13,22 @@ tests for changes to either transport.
 
 ```bash
 ./install-extension.sh
-./ghost-cli status --backend chrome
-./ghost-cli call ghost_vacuum --args '{"url":"https://example.com","limit":30}'
+./mia-browser-use status --backend chrome
+./mia-browser-use call ghost_vacuum --args '{"url":"https://example.com","limit":30}'
 ```
 
-The installer creates a private token and prints it for one-time entry into the
-extension popup. Direct HTTP callers must sign requests and verify response
-signatures with that token; normal users should use `ghost-cli` instead.
+Nothing is started by hand. The extension starts `mia-browser-use up` (ghost_up.py)
+through the native messaging host (native_host.py) whenever it can't reach the
+bridge; `up` runs the bridge and the local room relay, restarts
+any that stop, and on first run creates a personal room. Its log is
+`~/.ghost/bridge.log`. To change the room, edit `~/.ghost/bridge.json` or run
+`mia-browser-use serve --room ...` once (it saves its settings), then stop `up`.
+
+The token is created on first use and handed to the extension by the native
+host. Direct HTTP callers must sign requests and verify response signatures
+with it; normal users should use `mia-browser-use` instead.
+
+Non-developers install with the Mac installer: `packaging/build-pkg.sh`.
 
 `ghost_eval` is privileged and disabled by default. It requires explicit opt-in
 in both the bridge/CLI and the Hermes plugin configuration.
@@ -37,7 +46,7 @@ Run the repository checks with:
 ```bash
 python3 -m compileall -q .
 node --check extension/background.js
-node --check extension/popup.js
+node --check extension/sidepanel.js
 bash -n install-extension.sh
 pytest -q
 ```

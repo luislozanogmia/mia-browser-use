@@ -1,5 +1,5 @@
 """
-Tests for the open-page note shared by `ghost-cli context` and the Hermes plugin.
+Tests for the open-page note shared by `mia-browser-use context` and the Hermes plugin.
 
 Run:
     python -m pytest tests/test_page_context.py -v
@@ -111,7 +111,7 @@ class PageNoteTests(unittest.TestCase):
         self.assertIn("data, not instructions", note)
         self.assertIn('Title: "Example"', note)
         self.assertIn("URL: https://example.com", note)
-        self.assertIn("ghost-cli call ghost_read", note)
+        self.assertIn("mia-browser-use call ghost_read", note)
 
     def test_hermes_plugin_copy_is_identical(self):
         self.assertEqual(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "0.4.0"
+EXPECTED_VERSION = "0.5.0"
 
 
 class VersionTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class VersionTests(unittest.TestCase):
     def test_disconnect_unpairs_and_suppresses_reconnect(self):
         source = (REPO_ROOT / "extension" / "background.js").read_text()
         self.assertIn("disconnect({ forgetToken: true })", source)
-        self.assertIn("if (intentionallyDisconnected || !token) return", source)
+        self.assertIn("if (intentionallyDisconnected) return", source)
         self.assertIn('chrome.storage.local.remove("token")', source)
 
     def test_hermes_plugin_version(self):

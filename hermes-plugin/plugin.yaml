@@ -1,5 +1,5 @@
 name: ghost
-version: 0.4.0
+version: 0.5.0
 description: "Control a signed-in Chrome window or the Hermes Desktop browser through authenticated local transports."
 author: Luis Lozano
 kind: standalone
@@ -21,6 +21,8 @@ provides_tools:
   - ghost_scroll
   - ghost_wait
   - ghost_show
+  - ghost_suggest
+  - ghost_room
 provides_hooks:
   - pre_llm_call
 config_schema:

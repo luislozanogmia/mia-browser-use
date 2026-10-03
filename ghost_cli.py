@@ -32,6 +32,7 @@ HERMES_COMMANDS = {
     "ghost_scroll": "scroll",
     "ghost_wait": "wait",
     "ghost_show": "show",
+    "ghost_suggest": "suggest",
 }
 
 
@@ -106,7 +107,7 @@ def _json_object(value: str) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ghost-cli", description="Control Chrome or Hermes Desktop")
+    parser = argparse.ArgumentParser(prog="mia-browser-use", description="Control Chrome or Hermes Desktop")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     status = sub.add_parser("status", help="Show the selected browser connection")
@@ -126,10 +127,74 @@ def build_parser() -> argparse.ArgumentParser:
     token = sub.add_parser("bridge-token", help="Create and print the Chrome extension pairing token")
     token.add_argument("--path-only", action="store_true", help="Print only the token file path")
 
+    sub.add_parser("pair-chrome", help="Let the Chrome extension pair itself (installs a native messaging host)")
+    sub.add_parser("up", help="Run and watch everything Ghost needs (bridge and local room); Chrome starts this by itself")
+
     serve = sub.add_parser("serve", help="Run the Chrome extension bridge")
     serve.add_argument("--port", type=int, default=9377)
     serve.add_argument("--allow-eval", action="store_true", help="Explicitly enable ghost_eval in the bridge")
+    serve.add_argument("--room", help="Join this multiplayer room (key from GHOST_ROOM_KEY or ~/.ghost/rooms/<room>.key)")
+    serve.add_argument("--room-url", default=os.getenv("GHOST_ROOM_URL", "ws://127.0.0.1:9390"), help="Room relay URL (wss:// unless on this machine)")
+    serve.add_argument("--me", default=os.getenv("GHOST_ME"), help="Your id in the room, e.g. luis")
+    serve.add_argument("--name", help="Your display name in the room")
+    serve.add_argument("--color", help="Your player color, e.g. #3b82f6")
+
+    room = sub.add_parser("room", help="Multiplayer rooms")
+    room_sub = room.add_subparsers(dest="room_command", required=True)
+    host = room_sub.add_parser("serve", help="Run a room relay on this machine")
+    host.add_argument("--room", required=True)
+    host.add_argument("--host", default="127.0.0.1", help="Listen address (keep 127.0.0.1 unless behind TLS)")
+    host.add_argument("--port", type=int, default=9390)
+    for name, help_text in (("status", "Show the room: members, shared pages, presence, suggestions"),):
+        room_sub.add_parser(name, help=help_text)
+    share = room_sub.add_parser("share", help="Share a page with the room")
+    share.add_argument("url")
+    unshare = room_sub.add_parser("unshare", help="Stop sharing a page")
+    unshare.add_argument("url")
+    answer = room_sub.add_parser("answer", help="Run a bot that answers questions people ask about selected text")
+    answer.add_argument("--as", dest="actor", default="claude", help="The bot's id in the room")
+    answer.add_argument("--model", default=os.getenv("GHOST_ASK_MODEL", "sonnet"), help="Model for the answers (claude --model)")
+    answer.add_argument("--claude", default=os.getenv("GHOST_CLAUDE_BIN", "claude"), help="Path to the claude CLI")
+    answer.add_argument("--color", default="#d97706")
+    resolve = room_sub.add_parser("resolve", help="Accept or reject a suggestion")
+    resolve.add_argument("id")
+    resolve.add_argument("decision", choices=("accept", "reject"))
     return parser
+
+
+def run_room_command(args) -> Any:
+    if args.room_command == "serve":
+        import asyncio
+        from ghost_room import RoomHub, new_room_key
+        from room_link import load_room_key, save_room_key
+
+        key = load_room_key(args.room) or new_room_key()
+        path = save_room_key(args.room, key)
+        hub = RoomHub()
+        hub.store.create_room(args.room, key)
+
+        async def run():
+            from ghost_room import serve_room
+
+            server = await serve_room(hub, args.host, args.port)
+            print(f"[room] {args.room} on ws://{args.host}:{args.port}  key file: {path}")
+            await server.serve_forever()
+
+        asyncio.run(run())
+        return None
+    if args.room_command == "answer":
+        from ask_bot import AskBot, claude_answer, claude_report
+
+        validate_actor(args.actor)
+        bot = AskBot(args.actor, claude_answer(args.model, args.claude), color=args.color,
+                     report=claude_report(args.model, args.claude),
+                     label=f"{args.actor.capitalize()} · {args.model}")
+        bot.run_forever()
+        return None
+    bridge = BridgeTransport()
+    command = {"status": "ghost_room", "share": "room_share", "unshare": "room_unshare", "resolve": "room_resolve"}[args.room_command]
+    params = {k: getattr(args, k) for k in ("url", "id", "decision") if hasattr(args, k)}
+    return bridge.call(command, params)
 
 
 def page_context_note(client: BrowserClient) -> str:
@@ -158,11 +223,44 @@ def main() -> None:
             value = load_bridge_token(create=True)
             print(token_path() if args.path_only else value)
             return
+        if args.subcommand == "pair-chrome":
+            from native_host import install_native_host
+
+            print(json.dumps(install_native_host(), indent=2))
+            return
+        if args.subcommand == "up":
+            import ghost_up
+
+            ghost_up.main()
+            return
         if args.subcommand == "serve":
             import asyncio
             from bridge_server import BridgeServer
 
-            asyncio.run(BridgeServer(port=args.port, allow_eval=args.allow_eval).run())
+            room = None
+            if args.room:
+                from room_link import RoomLink, load_room_key
+
+                key = load_room_key(args.room)
+                if not key:
+                    raise SystemExit(f"No key for room {args.room}; set GHOST_ROOM_KEY or put it in ~/.ghost/rooms/{args.room}.key")
+                me_id = validate_actor(args.me)
+                if not me_id:
+                    raise SystemExit("--me is required with --room")
+                me = {"id": me_id, "kind": "human", "name": args.name or me_id}
+                if args.color:
+                    me["color"] = args.color
+                room = RoomLink(args.room_url, args.room, key, me, on_message=None)
+            # The extension restarts the bridge with these settings when it finds it down.
+            from native_host import save_bridge_config
+
+            save_bridge_config(args.port, args.room, args.room_url, args.me, args.name, args.color)
+            asyncio.run(BridgeServer(port=args.port, allow_eval=args.allow_eval, room=room).run())
+            return
+        if args.subcommand == "room":
+            result = run_room_command(args)
+            if result is not None:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         if args.subcommand == "context":
             # Prompt hooks must never block the user's message, so failures print nothing.

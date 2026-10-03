@@ -40,6 +40,7 @@ GHOST_TO_HERMES = {
     "ghost_scroll": "scroll",
     "ghost_wait": "wait",
     "ghost_show": "show",
+    "ghost_suggest": "suggest",
 }
 
 

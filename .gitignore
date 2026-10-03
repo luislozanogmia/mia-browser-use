@@ -25,3 +25,7 @@ backup/
 *.bak-*
 *.prev-*
 .DS_Store
+build/
+
+# Local Claude Code settings
+.claude/

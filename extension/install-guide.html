@@ -309,23 +309,23 @@
         <span id="extPath">extension/</span>
         <button class="copy-btn" onclick="copyPath()">Copy</button>
       </div>
-      <p class="hint">The path is also copied to your clipboard by the install script</p>
+      <p class="hint">The folder is already copied. In the folder picker press <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd>, paste with <kbd>⌘</kbd><kbd>V</kbd>, press Return, then click <strong>Select</strong>.</p>
     </div>
 
     <div class="step" id="step3">
       <div class="step-number">3</div>
       <div class="step-check" onclick="toggleStep(3)">○</div>
-      <h2>Connect</h2>
-      <p>Click the <strong>Ghost Bridge</strong> icon, paste the pairing token printed by the installer, then click <strong>Connect</strong>.</p>
+      <h2>Open Mia</h2>
+      <p>Click the <strong>Ghost</strong> icon in the toolbar. Ghost connects by itself, so there's nothing to paste.</p>
       <div class="visual-guide">
         <div style="display:inline-flex;align-items:center;gap:8px;">
           <span class="arrow arrow-right">👉</span>
           <div style="background:#6366f1;color:white;width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;">G</div>
           <span style="color:#94a3b8;">→</span>
-          <span class="mock-btn" style="background:#6366f1;color:white;border-color:#6366f1;">Connect</span>
+          <span class="mock-btn" style="background:#6366f1;color:white;border-color:#6366f1;">Mia</span>
         </div>
       </div>
-      <p class="hint">If you don't see the icon, click the puzzle piece 🧩 in the toolbar and pin Ghost Bridge</p>
+      <p class="hint">If you don't see the icon, click the puzzle piece 🧩 in the toolbar and pin Mia</p>
     </div>
 
     <div class="status-bar" id="statusBar">
@@ -337,7 +337,9 @@
   <script>
     // Set the extension path from URL params (install script passes it)
     const params = new URLSearchParams(window.location.search);
-    const extPath = params.get('path');
+    // Without ?path=, this page sits inside the extension folder itself.
+    const extPath = params.get('path') ||
+      (location.protocol === 'file:' ? decodeURIComponent(location.pathname.replace(/\/[^/]*$/, '')) : '');
     if (extPath) {
       document.getElementById('extPath').textContent = extPath;
     }
@@ -363,7 +365,7 @@
       }
     }
 
-    document.getElementById('statusTitle').textContent = '🔐 Pairing required';
+    document.getElementById('statusTitle').textContent = '⏳ Waiting for the extension';
   </script>
 </body>
 </html>

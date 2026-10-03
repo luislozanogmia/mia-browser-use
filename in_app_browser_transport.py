@@ -370,7 +370,7 @@ class InAppBrowserTransport:
         return "in-app-browser-transport"
 
     # ------------------------------------------------------------------
-    # Convenience methods (mirror ghost-cli tool names)
+    # Convenience methods (mirror mia-browser-use tool names)
     # ------------------------------------------------------------------
 
     def navigate(self, url: str, tab_id: Optional[int] = None) -> dict:

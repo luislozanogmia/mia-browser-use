@@ -33,6 +33,19 @@ _SHOW_SCHEMA = _schema({
     "tab_id": {"type": "integer"},
 })
 
+_SUGGEST_SCHEMA = _schema({
+    "tab_id": {"type": "integer"},
+    "choice": {"type": "integer"},
+    "selector": {"type": "string"},
+    "text": {"type": "string", "maxLength": 500},
+    "rect": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}, "required": ["x", "y", "w", "h"]},
+    "title": {"type": "string", "maxLength": 120},
+    "body": {"type": "string", "maxLength": 600},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$"},
+    "kind": {"type": "string", "enum": ["edit", "note"]},
+    "reply_to": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$"},
+}, ["title"])
+
 TOOL_SPECS = (
     ("ghost_status", "Check the selected browser connection and page.", _schema()),
     ("ghost_tab_list", "List browser tabs.", _schema()),
@@ -50,6 +63,8 @@ TOOL_SPECS = (
     ("ghost_screenshot", "Capture the visible browser page.", _schema({"tab_id": {"type": "integer"}, "format": {"type": "string", "enum": ["png", "jpeg"]}, "quality": {"type": "integer", "minimum": 1, "maximum": 100}})),
     ("ghost_scroll", "Scroll the current page.", _schema({"tab_id": {"type": "integer"}, "direction": {"type": "string", "enum": ["up", "down", "top", "bottom"]}, "amount": {"type": "integer"}})),
     ("ghost_show", "Show what you are working on: ring a numbered element, selector, text, or page rect with your mote and label. Shows only; it never edits the page.", _SHOW_SCHEMA),
+    ("ghost_suggest", "Put a card next to a numbered element, selector, text or page rect. kind=edit (default) proposes a change people accept or reject; apply it only after ghost_room shows it accepted. kind=note just explains. reply_to answers a question from ghost_room's asks, on the text it was asked about.", _SUGGEST_SCHEMA),
+    ("ghost_room", "See the multiplayer room: who is here, which pages are shared, where everyone is working, questions people asked about selected text (asks), and decisions on your suggestions. wait_ms waits up to 50 s for a question or a change in shared pages.", _schema({"wait_ms": {"type": "integer", "minimum": 0, "maximum": 50000}})),
     ("ghost_wait", "Wait for a selector or a bounded delay.", _schema({"tab_id": {"type": "integer"}, "selector": {"type": "string"}, "ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "timeout": {"type": "integer", "minimum": 1, "maximum": 30000}})),
 )
 

@@ -16,8 +16,8 @@ hermes plugins install ./hermes-plugin
 hermes tools enable ghost
 ```
 
-For Chrome, start `./ghost-cli serve`, run `./ghost-cli bridge-token`, and paste
-that value into the extension popup. For Hermes Desktop, the app must expose
+For Chrome, start `./mia-browser-use serve`, run `./mia-browser-use bridge-token`, and paste
+that value into the extension's settings (the gear in its side panel). For Hermes Desktop, the app must expose
 the protocol documented in `IN_APP_BROWSER_PROTOCOL.md` and create its private
 token file.
 

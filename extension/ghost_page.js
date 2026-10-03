@@ -9,7 +9,7 @@
  * in-app browser can run it in the page. It keeps no state outside the page.
  */
 (() => {
-  if (globalThis.__ghostPage) return;
+  if (globalThis.__ghostPage && globalThis.__ghostPage.build === globalThis.__ghostBuild) return;
 
   const ACTOR_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
   const lists = new Map(); // actor_id -> {snapshot, elements: []}
@@ -31,10 +31,20 @@
     return style.display !== "none" && style.visibility !== "hidden";
   }
 
+  const CONTROLS = new Set(["a", "button", "input", "select", "textarea"]);
+  const NESTED = "a[href], button, input, select, textarea, [role=button], [onclick], [tabindex]:not([tabindex='-1'])";
+
   function isInteractive(node, tag) {
-    return tag === "a" || tag === "button" || tag === "input" || tag === "select" || tag === "textarea" ||
-      node.getAttribute("role") === "button" || node.hasAttribute("onclick") || node.hasAttribute("tabindex") ||
-      node.isContentEditable && !node.parentElement?.isContentEditable;
+    // tabindex="-1" only makes a region focusable from script (skip links jump to <main> that way): not a control.
+    const tabindex = node.getAttribute("tabindex");
+    return CONTROLS.has(tag) || node.getAttribute("role") === "button" || node.hasAttribute("onclick") ||
+      tabindex !== null && tabindex !== "-1" || node.isContentEditable && !node.parentElement?.isContentEditable;
+  }
+
+  // A clickable wrapper (a card, a list) that holds its own controls or a lot of text: number it, and read inside.
+  function isContainer(node, tag) {
+    return !CONTROLS.has(tag) && !node.isContentEditable &&
+      (node.querySelector(NESTED) !== null || (node.textContent || "").length > 300);
   }
 
   function describe(node, tag, n) {
@@ -74,10 +84,13 @@
       if (isInteractive(node, tag)) {
         const n = items.length;
         elements[n] = node;
-        const line = describe(node, tag, n);
+        const container = isContainer(node, tag);
+        // A container's text follows below, so its own line only names it.
+        const line = container ? `[${n}] ${tag}: ${(node.getAttribute("aria-label") || node.getAttribute("title") || "area").slice(0, 100)}`
+          : describe(node, tag, n);
         items.push(line);
         chars += line.length;
-        return;
+        if (!container) return;
       }
       for (const child of node.childNodes) {
         if (chars >= maxChars) break;
@@ -185,5 +198,5 @@
     return anchorOf(el);
   }
 
-  globalThis.__ghostPage = { enumerate, resolve, anchorOf, cssPath, click, fill, typeInto, humanFocus };
+  globalThis.__ghostPage = { enumerate, resolve, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
 })();

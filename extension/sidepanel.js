@@ -455,9 +455,19 @@ function setting(message, delay = 300) {
 
 $("openSettings").addEventListener("click", () => toggleSettings($("settings").hidden));
 $("closeSettings").addEventListener("click", () => toggleSettings(false));
-$("shareBtn").addEventListener("click", () => setting({ type: "share-tab" }, 500));
+$("shareBtn").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url || !confirm(`Share this page address with everyone in the room?\n\n${tab.url}\n\nThe address may contain private information in its path or search terms.`)) return;
+  setting({ type: "share-tab" }, 500);
+});
 $("unshareBtn").addEventListener("click", () => setting({ type: "unshare-tab" }, 500));
-$("followMe").addEventListener("change", () => setting({ type: "follow", on: $("followMe").checked }, 500));
+$("followMe").addEventListener("change", () => {
+  if ($("followMe").checked && !confirm("Follow mode shares each page address you open with everyone in the room, including its path. Continue?")) {
+    $("followMe").checked = false;
+    return;
+  }
+  setting({ type: "follow", on: $("followMe").checked }, 500);
+});
 $("reelMode").addEventListener("change", () => setting({ type: "reel", on: $("reelMode").checked }));
 for (const id of ["immersive", "skipPrompt"]) {
   $(id).addEventListener("change", () => setting({ type: "modes", immersive: $("immersive").checked, skip: $("skipPrompt").checked }));

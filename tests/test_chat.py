@@ -118,11 +118,11 @@ def test_looking_things_up_goes_to_other_sites_in_its_own_tab_and_answers_in_cha
         calls = [(c, a) for c, a in browser.actions() if c != "ghost_tab_list"]
         assert [c for c, _ in calls] == ["ghost_read", "ghost_tab_open", "ghost_wait", "ghost_read", "ghost_tab_close"]
         read = calls[0][1]
-        assert read["max_chars"] == 8000 and read["tab_id"] == 5 and read["human_ok"] is True
+        assert read["max_chars"] == 8000 and read["tab_id"] == 5 and read["human_ok"] is False
         # The person's tab stays put: the search opens in a tab of the worker's own, which keeps
         # working even while the person watches it.
         assert calls[1][1]["url"] == "https://jobs.example/search?q=ai"
-        assert calls[3][1]["tab_id"] == 77 and calls[3][1]["human_ok"] is True
+        assert calls[3][1]["tab_id"] == 77 and calls[3][1]["human_ok"] is False
         assert hub.messages[-1]["text"] == "Mia: Top 5 jobs: ..."  # Mia answers, from what her bot found
         assert sessions[0].closed
         # Mia closes the tab her bot opened once it has the answer, and the bot leaves the list.
@@ -145,10 +145,18 @@ def test_do_waits_for_approval_before_a_risky_click():
             await asyncio.sleep(0.01)
         assert task.status == "needs_you" and "Send" in task.question
         assert "ghost_click" not in [c for c, _ in browser.actions()]
+        first_question = task.question
+        await hub.handle({"action": "approve", "task": task.id})
+        for _ in range(50):
+            if task.status == "needs_you" and task.question != first_question:
+                break
+            await asyncio.sleep(0.01)
+        assert task.status == "needs_you" and "Send" in task.question
         await hub.handle({"action": "approve", "task": task.id})
         await settle(hub)
         clicks = [a for c, a in browser.actions() if c == "ghost_click"]
-        assert clicks == [{"choice": 1, "tab_id": 5, "actor_id": "mia-1", "human_ok": True}]
+        assert clicks == [{"choice": 1, "tab_id": 5, "actor_id": "mia-1", "human_ok": True,
+                           "expected_url": "https://mail.example/"}]
         assert task.status == "done" and hub.messages[-1]["text"] == "Mia: Sent."
     asyncio.run(main())
 
@@ -232,6 +240,12 @@ def test_rejected_action_never_runs():
             if task.status == "needs_you":
                 break
             await asyncio.sleep(0.01)
+        assert "control this tab" in task.question
+        await hub.handle({"action": "approve", "task": task.id})
+        for _ in range(50):
+            if task.status == "needs_you" and task.question == "Go to the next page?":
+                break
+            await asyncio.sleep(0.01)
         assert task.question == "Go to the next page?"
         await hub.handle({"action": "reject", "task": task.id})
         await settle(hub)
@@ -253,7 +267,7 @@ def test_parallel_tasks_get_their_own_tabs_and_never_eval():
         commands = [c for c, _ in browser.actions()]
         assert "ghost_eval" not in commands and commands.count("ghost_tab_open") == 2
         read = next(a for c, a in browser.actions() if c == "ghost_read")
-        assert read["tab_id"] == 77 and read["actor_id"].startswith("mia-") and read["human_ok"] is True
+        assert read["tab_id"] == 77 and read["actor_id"].startswith("mia-") and read["human_ok"] is False
         # The javascript: url was dropped, so that task works on the current tab instead.
         assert [t.own_tab for t in hub.tasks.values()] == [True, True, False]
     asyncio.run(main())

@@ -408,6 +408,8 @@ class Task:
         self.page_hosts = {agent.host} if agent.host else set()  # origins whose page context this task has seen
         self.page_text = ""  # bounded source text used to identify data copied into outbound URLs
         self.control_approved = False  # owner granted this do task control of its tab
+        self.control_url = ""  # exact address at the grant, enforced by the extension
+        self.current_url = url
 
     @property
     def tab_id(self) -> int | None:
@@ -659,6 +661,7 @@ class ChatHub:
             target = where["id"] if where else None if url else tab_id
             task = self.add(Task(next(self.counter), t["title"], t["goal"], url, t["kind"], run, model,
                                  self.agent_for(target, where["url"] if where else tab.get("url"))))
+            task.current_url = url or str(where["url"] if where else tab.get("url") or "")
             if where:
                 task.where = f"the person's tab “{_text(where['title'], 80)}” ({_text(where['url'], 200)})"
             task.needs = [tasks[n] for n in t["needs"]]
@@ -948,6 +951,7 @@ class ChatHub:
                     if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
                         raise RuntimeError(f"Couldn't open {task.url}: {value}")
                     task.tab_id = value["id"]
+                    task.current_url = value.get("url") or task.url
                     task.agent.opened = True
                     task.agent.host = _host(value.get("url") or task.url)
                     self.name_agent(task.agent)
@@ -1055,10 +1059,10 @@ class ChatHub:
             print(f"[chat] couldn't update the card for {task.id}: {exc}")
 
     def args(self, task: Task, args: dict) -> dict:
-        """A worker's call: its own tab, its own actor, and the person's go-ahead. They asked Mia for this,
-        so a bot keeps working while they watch, on their tab or on one the bot opened."""
-        args = {k: v for k, v in args.items() if k not in {"tab_id", "actor_id", "human_ok", "script", "password"}}
-        return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id, "human_ok": True}
+        """Bind a worker call to its tab and actor; only an explicit grant overrides the viewing guard."""
+        args = {k: v for k, v in args.items() if k not in {"tab_id", "actor_id", "human_ok", "expected_url", "script", "password"}}
+        return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id,
+                "human_ok": task.control_approved, "expected_url": task.control_url if task.control_approved else ""}
 
     async def wait_for_approval(self, task: Task, question: str, choice: Any = None) -> bool:
         task.status, task.question = "needs_you", question
@@ -1083,13 +1087,20 @@ class ChatHub:
         if tool in {"ghost_vacuum", "ghost_navigate"}:
             if external_url_needs_approval(args.get("url", ""), task.page_hosts, task.page_text):
                 question = f"Open {_text(args.get('url'), 150)}? This sends the address to that site."
-        if task.kind == "do" and tool in {"ghost_click", "ghost_fill", "ghost_key", "ghost_navigate", "ghost_vacuum"} and not task.control_approved:
-            question = question or f"Let {task.label} change this tab for “{task.title}”?"
+        if task.kind == "do" and tool in {"ghost_click", "ghost_fill", "ghost_key", "ghost_scroll", "ghost_navigate", "ghost_vacuum"} and not task.control_approved:
+            ok_tabs, listed = await self.call("ghost_tab_list", {})
+            if ok_tabs and isinstance(listed, dict):
+                task.current_url = next((t.get("url") for t in listed.get("tabs", [])
+                                         if isinstance(t, dict) and t.get("id") == task.tab_id), task.current_url)
+            if not task.current_url:
+                return "Could not verify this tab's address for control approval."
+            if not await self.wait_for_approval(task, f"Let {task.label} control this tab for “{task.title}”?", args.get("choice")):
+                return "The person rejected tab control. Do not try it again; finish another way or stop with done."
+            task.control_approved = True
+            task.control_url = task.current_url
         if question:
             if not await self.wait_for_approval(task, question, args.get("choice")):
                 return "The person rejected that action. Do not try it again; finish another way or stop with done."
-            if task.kind == "do":
-                task.control_approved = True
         await self.publish()
         if tool in {"ghost_vacuum", "ghost_navigate"} and not task.own_tab:
             await self.move_to_own_tab(task, args["url"])
@@ -1105,25 +1116,37 @@ class ChatHub:
         except Exception as exc:
             ok, value = False, str(exc)
         if not ok:
+            if "TAB_CHANGED" in str(value):
+                task.control_approved = False
+                task.control_url = ""
+                task.current_url = ""
             return f"Error from {tool}: {_text(value, 400)}"
         if tool in {"ghost_read", "ghost_vacuum"} and isinstance(value, dict):
+            if isinstance(value.get("url"), str):
+                task.current_url = value["url"]
             task.elements = {int(n): line for n, line in ELEMENT_LINE.findall(str(value.get("content") or ""))}
             if value.get("content") and _host(value.get("url")):
                 task.page_hosts.add(_host(value.get("url")))
                 task.page_text = (task.page_text + "\n" + str(value["content"]))[-32000:]
         elif tool in {"ghost_navigate", "ghost_click", "ghost_key"}:
             task.elements = {} if tool == "ghost_navigate" else task.elements
+            if tool == "ghost_navigate":
+                task.control_approved = False
+                task.control_url = ""
         return page_block(tool, value)
 
     async def move_to_own_tab(self, task: Task, url: str) -> None:
         """Going to another page leaves the person's tab alone: the worker gets a new tab, and agent."""
         await self.show(task, None, clear=True)
+        task.control_approved = False
+        task.control_url = ""
         agent = self.agent_for(None, url)
         ok, value = await self.call("ghost_tab_open", {"url": url, "actor_id": agent.id})
         if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
             raise RuntimeError(f"Couldn't open {url}: {value}")
         task.agent, task.own_tab = agent, True
         task.tab_id = value["id"]
+        task.current_url = value.get("url") or url
         agent.opened = True
         agent.host = _host(value.get("url") or url)
         self.name_agent(agent)

@@ -350,6 +350,10 @@ function lifecycleError(err, tabId) {
 }
 
 async function handleCommand(command, args) {
+  if (args?.expected_url && ["ghost_click", "ghost_fill", "ghost_key", "ghost_scroll", "ghost_navigate", "ghost_vacuum"].includes(command)) {
+    const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
+    if (!tab || tab.url !== args.expected_url) throw typedError("TAB_CHANGED", "The tab address changed after approval");
+  }
   if (args?.room_only && (command === "ghost_show" || command === "ghost_suggestion")) {
     const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
     if (!isAcceptedTab(tab)) throw typedError("ROOM_ACCESS_DENIED", "This tab is not accepted for the room");
@@ -1279,15 +1283,17 @@ let lastShot = 0;
 const lastPageShot = new Map(); // page -> time, so reloads don't repeat it
 
 async function reelCapture(tab, extra) {
-  if (!reelOn || !tab?.active || !isShared(tab.url)) return;
+  if (!reelOn || !tab?.active || !isAcceptedTab(tab)) return;
   // Chrome allows about two captures a second.
   const wait = lastShot + 600 - Date.now();
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
   lastShot = Date.now();
   try {
     const fresh = await chrome.tabs.get(tab.id);
-    if (!fresh.active || pageKey(fresh.url) !== pageKey(tab.url)) return; // the human moved on
+    if (!fresh.active || fresh.url !== tab.url || !isAcceptedTab(fresh)) return;
     const image = await chrome.tabs.captureVisibleTab(fresh.windowId, { format: "jpeg", quality: 70 });
+    const after = await chrome.tabs.get(tab.id);
+    if (after.url !== fresh.url || !isAcceptedTab(after)) return;
     await reelAdd({ ts: Date.now(), url: fresh.url, title: fresh.title || "", image, ...extra });
     chrome.runtime.sendMessage({ type: "reel-added" }).catch(() => {});
   } catch {}
@@ -1312,7 +1318,11 @@ async function saveConversation(tab, conversation) {
   chrome.storage.session.set({ closedThreads: [...closedThreads].slice(-500) }).catch(() => {});
   let image = null;
   try {
-    if (tab.active) image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+    if (tab.active && isAcceptedTab(tab)) {
+      image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+      const after = await chrome.tabs.get(tab.id);
+      if (after.url !== tab.url || !isAcceptedTab(after)) image = null;
+    }
   } catch {}
   const turns = (Array.isArray(conversation.turns) ? conversation.turns : []).slice(0, 100).map(t => ({
     q: String(t?.q || "").slice(0, 600), by: String(t?.by || "").slice(0, 80),
@@ -1324,16 +1334,16 @@ async function saveConversation(tab, conversation) {
 
 function reelPage(tab) {
   const key = pageKey(tab.url);
-  if (!reelOn || !key || Date.now() - (lastPageShot.get(key) || 0) < 30000) return;
+  if (!reelOn || !isAcceptedTab(tab) || !key || Date.now() - (lastPageShot.get(key) || 0) < 30000) return;
   lastPageShot.set(key, Date.now());
   // Give the page a moment to draw.
   setTimeout(() => reelCapture(tab, { kind: "page" }), 1500);
 }
 
-chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active && isShared(tab.url)) reelPage(tab); });
+chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active && isAcceptedTab(tab)) reelPage(tab); });
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab && tab.status === "complete" && isShared(tab.url)) reelPage(tab);
+  if (tab && tab.status === "complete" && isAcceptedTab(tab)) reelPage(tab);
 });
 
 // ---------------------------------------------------------------------------
@@ -1513,7 +1523,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "reel") {
     reelOn = Boolean(msg.on);
     chrome.storage.local.set({ reel: reelOn }).then(() => sendResponse({ ok: true }));
-    if (reelOn) chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => tab && isShared(tab.url) && reelPage(tab));
+    if (reelOn) chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => tab && isAcceptedTab(tab) && reelPage(tab));
     return true;
   }
   if (msg.type === "open-reel") {

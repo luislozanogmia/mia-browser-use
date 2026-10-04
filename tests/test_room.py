@@ -18,9 +18,31 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ghost_room import MAX_MESSAGE_BYTES, RoomHub, page_key, serve_room
+from room_link import RoomLink
 
 KEY = "k" * 40
 SHEET = "https://docs.google.com/spreadsheets/d/abc/edit#gid=0"
+
+
+def test_room_link_strips_private_urls_before_the_relay():
+    class Wire:
+        sent = None
+
+        async def send(self, raw):
+            self.sent = raw
+
+    async def check():
+        link = RoomLink("wss://relay.example/room", "room", KEY, {"id": "owner"}, lambda _: None)
+        link._ws = Wire()
+        link.connected = True
+        await link.send({"action": "ask", "url": "https://example.com/report?view=compact&token=secret-123",
+                         "links": [{"href": "https://example.com/page?page=2&token=secret-123"}]})
+        assert "secret-123" not in link._ws.sent
+        outgoing = json.loads(link._ws.sent)
+        assert outgoing["url"] == "https://example.com/report?view=compact"
+        assert outgoing["links"][0]["href"] == "https://example.com/page?page=2"
+
+    asyncio.run(check())
 
 
 class Clock:
@@ -185,6 +207,22 @@ class RoomHubTests(unittest.TestCase):
         self.assertEqual(reply["href"], here)
         other = of_type(self.hub.handle("a", {"action": "ask", "url": "https://elsewhere.example/x?q=1", "question": "Hm?"}), "error")
         self.assertTrue(other)
+
+    def test_room_questions_withhold_private_query_parameters(self):
+        self.join("a", "luis")
+        self.join("b", "ana")
+        self.share("a")
+        secret = "private-value-for-this-test"
+        url = SHEET.split("#")[0] + f"?view=compact&access_token={secret}&q=budget"
+        link = f"https://example.com/report?page=2&signature={secret}#section"
+        asked = self.hub.handle("a", {"action": "ask", "url": url, "id": "safe-q", "question": "What is this?",
+                                       "links": [{"href": link, "text": "Report"}]})
+        ask = of_type(asked, "ask")[0][1]
+        self.assertEqual(ask["href"], SHEET.split("#")[0] + "?view=compact&q=budget")
+        self.assertEqual(ask["links"], [{"href": "https://example.com/report?page=2", "text": "Report"}])
+        self.assertNotIn(secret, json.dumps(asked))
+        snapshot = self.join("c", "mo")[0][1]
+        self.assertNotIn(secret, json.dumps(snapshot))
 
     def test_humans_ask_and_a_bot_answer_closes_the_question(self):
         self.join("a", "luis")

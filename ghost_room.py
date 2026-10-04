@@ -40,7 +40,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 # A question can carry 4000 chars of selected text, 8 links and an anchor: about 20 KB.
 MAX_MESSAGE_BYTES = 32 * 1024
@@ -128,14 +128,31 @@ def clean_rect(value: Any) -> Optional[dict]:
     return rect if all(v is not None for v in rect.values()) else None
 
 
-def page_href(url: Any, key: str) -> str:
-    """The exact address a question was asked on (with its query, without the fragment).
+ROOM_QUERY_KEYS = frozenset({
+    "q", "query", "search", "term", "page", "start", "offset", "sort",
+    "filter", "view", "tab", "gid", "lang", "language",
+})
+TOKENISH_VALUE = re.compile(r"^(?:[A-Za-z0-9_-]{32,}|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$")
 
-    Single-page apps (a YouTube search) change the query without loading a new page;
-    the question belongs to that address, not to every address with the same path."""
-    if not isinstance(url, str) or page_key(url) != key:
+
+def room_safe_href(url: Any) -> Optional[str]:
+    """Keep ordinary page navigation while withholding private query parameters from a room."""
+    key = page_key(url)
+    if not key:
+        return None
+    try:
+        pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True, max_num_fields=64)
+    except ValueError:
         return key
-    return url.split("#", 1)[0][:2000]
+    safe = [(name, value) for name, value in pairs
+            if name.lower() in ROOM_QUERY_KEYS and len(value) <= 128 and not TOKENISH_VALUE.fullmatch(value)]
+    query = urlencode(safe)
+    return f"{key}?{query}" if query else key
+
+
+def page_href(url: Any, key: str) -> str:
+    """A question's room-visible address, with only ordinary navigation parameters."""
+    return room_safe_href(url) if page_key(url) == key else key
 
 
 def clean_language(value: Any) -> str:
@@ -152,7 +169,9 @@ def clean_links(value: Any) -> list[dict]:
     for item in value if isinstance(value, list) else []:
         href = item.get("href") if isinstance(item, dict) else None
         if isinstance(href, str) and re.match(r"^https?://[^\s]{1,990}$", href):
-            links.append({"href": href, "text": _text(item.get("text"), 200)})
+            safe_href = room_safe_href(href)
+            if safe_href:
+                links.append({"href": safe_href, "text": _text(item.get("text"), 200)})
         if len(links) == 8:
             break
     return links

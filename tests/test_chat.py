@@ -2,9 +2,17 @@ import asyncio
 import json
 
 import ghost_chat
-from ghost_chat import ChatHub, check_action, needs_approval, parse_plan
+from ghost_chat import ChatHub, check_action, external_url_needs_approval, needs_approval, parse_plan
 
 PAGE = "Inbox\n[0] link: Home (/)\n[1] button: Send\n[2] input(password): Password\n[3] button: Next page"
+
+
+def test_model_chosen_urls_always_need_approval_after_page_context():
+    seen = "Account balance 1234. Email alex@example.com"
+    assert external_url_needs_approval("https://search.example/search?q=weather", {"bank.example"}, seen)
+    assert external_url_needs_approval("https://outside.example/?q=alex%40example.com", {"bank.example"}, seen)
+    assert external_url_needs_approval("https://outside.example/collect?data=1234", {"bank.example"}, seen)
+    assert external_url_needs_approval("https://outside.example/alex%40example.com", {"bank.example"}, seen)
 
 class FakeSession:
     """A model that replies from a script, one JSON action per turn."""
@@ -80,6 +88,19 @@ async def settle(hub):
             return
         await asyncio.sleep(0.01)
 
+async def approve_navigation(hub, count=1):
+    approved = set()
+    for _ in range(count):
+        for _ in range(100):
+            pending = [t for t in hub.tasks.values()
+                       if t.id not in approved and t.status == "needs_you" and t.question.startswith("Open ")]
+            if pending:
+                break
+            await asyncio.sleep(0.01)
+        assert pending, "expected navigation approval"
+        approved.add(pending[0].id)
+        await hub.handle({"action": "approve", "task": pending[0].id})
+
 def send(text, mode="ask", run="parallel"):
     return {"action": "send", "text": text, "mode": mode, "run": run,
             "tab": {"id": 5, "url": "https://mail.example/", "title": "Inbox"}}
@@ -92,6 +113,7 @@ def test_looking_things_up_goes_to_other_sites_in_its_own_tab_and_answers_in_cha
             {"done": "Top 5 jobs: ..."},
         ]], plan={"reply": "", "tasks": [{"title": "Find jobs", "goal": "Read my profile, find jobs", "kind": "ask"}]})
         await hub.handle(send("find me jobs"))
+        await approve_navigation(hub)
         await settle(hub)
         calls = [(c, a) for c, a in browser.actions() if c != "ghost_tab_list"]
         assert [c for c, _ in calls] == ["ghost_read", "ghost_tab_open", "ghost_wait", "ghost_read", "ghost_tab_close"]
@@ -130,6 +152,73 @@ def test_do_waits_for_approval_before_a_risky_click():
         assert task.status == "done" and hub.messages[-1]["text"] == "Mia: Sent."
     asyncio.run(main())
 
+def test_ask_task_cannot_click_or_fill_even_when_label_looks_harmless():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_click", "args": {"choice": 3}},
+            {"tool": "ghost_fill", "args": {"choice": 2, "value": "changed"}},
+            {"done": "Could not change the page."},
+        ]], plan={"tasks": [{"title": "Inspect", "goal": "Inspect the page", "kind": "ask"}]})
+        await hub.handle(send("what is here?"))
+        await settle(hub)
+        self_actions = [c for c, _ in browser.actions()]
+        assert "ghost_click" not in self_actions and "ghost_fill" not in self_actions
+    asyncio.run(main())
+
+def test_planner_cannot_upgrade_persons_ask_mode_to_do():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_click", "args": {"choice": 3}},
+            {"done": "I did not click."},
+        ]], plan={"tasks": [{"title": "Inspect", "goal": "Inspect the page", "kind": "do"}]})
+        await hub.handle(send("what is here?", mode="ask"))
+        await settle(hub)
+        assert next(iter(hub.tasks.values())).kind == "ask"
+        assert "ghost_click" not in [command for command, _ in browser.actions()]
+    asyncio.run(main())
+
+def test_page_context_requires_approval_before_external_navigation():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_navigate", "args": {"url": "https://outside.example/collect?data=Inbox"}},
+            {"done": "Stopped."},
+        ]], plan={"tasks": [{"title": "Look up", "goal": "Look up information", "kind": "ask"}]})
+        await hub.handle(send("look it up"))
+        for _ in range(50):
+            task = next(iter(hub.tasks.values()))
+            if task.status == "needs_you":
+                break
+            await asyncio.sleep(0.01)
+        assert task.status == "needs_you"
+        assert "outside.example" in task.question
+        assert "ghost_tab_open" not in [c for c, _ in browser.actions()]
+        await hub.handle({"action": "reject", "task": task.id})
+        await settle(hub)
+        assert "ghost_tab_open" not in [c for c, _ in browser.actions()]
+    asyncio.run(main())
+
+def test_do_task_requires_owner_control_grant_for_neutral_click():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_click", "args": {"choice": 3}},
+            {"done": "Clicked."},
+        ]], plan={"tasks": [{"title": "Edit draft", "goal": "Edit the draft", "kind": "do"}]})
+        await hub.handle(send("edit the draft", mode="do"))
+        for _ in range(50):
+            task = next(iter(hub.tasks.values()))
+            if task.status == "needs_you":
+                break
+            await asyncio.sleep(0.01)
+        assert task.status == "needs_you"
+        assert "ghost_click" not in [c for c, _ in browser.actions()]
+        await hub.handle({"action": "reject", "task": task.id})
+        await settle(hub)
+        assert "ghost_click" not in [c for c, _ in browser.actions()]
+    asyncio.run(main())
+
 def test_rejected_action_never_runs():
     async def main():
         hub, browser, _, sessions = make_hub([[
@@ -159,6 +248,7 @@ def test_parallel_tasks_get_their_own_tabs_and_never_eval():
             {"title": "B", "goal": "do b", "url": "https://b.example/"},
             {"title": "C", "goal": "bad", "url": "javascript:alert(1)"}]})
         await hub.handle(send("both", mode="do"))
+        await approve_navigation(hub, 2)
         await settle(hub)
         commands = [c for c, _ in browser.actions()]
         assert "ghost_eval" not in commands and commands.count("ghost_tab_open") == 2
@@ -480,6 +570,7 @@ def test_a_bot_leaves_the_list_when_its_tab_closes_and_the_x_stops_and_closes_it
             return await _call(command, args)
         hub.call = slow
         await hub.handle(send("two things"))
+        await approve_navigation(hub)
         for _ in range(20):
             await asyncio.sleep(0.01)
         here = next(t for t in hub.tasks.values() if t.title == "Here").agent
@@ -514,6 +605,7 @@ def test_a_tab_the_person_asked_to_open_stays_open():
         hub, browser, _, _ = make_hub([[{"done": "LinkedIn is open."}]], plan={"reply": "", "tasks": [
             {"title": "Open LinkedIn", "goal": "open it", "kind": "ask", "url": "https://www.linkedin.com/", "keep_open": True}]})
         await hub.handle(send("open a linkedin bot"))
+        await approve_navigation(hub)
         await settle(hub)
         assert not any(c == "ghost_tab_close" for c, _ in browser.calls)
         assert hub.tasks["task-1"].status == "done" and hub.tasks["task-1"].agent.name == "LinkedIn bot"
@@ -574,6 +666,7 @@ def test_bots_run_sonnet_on_low_and_mia_runs_the_picked_model_on_medium(monkeypa
         hub, *_ = make_hub([[{"done": "Found it."}]], plan={"reply": "", "tasks": [
             {"title": "Look", "goal": "look it up", "kind": "ask", "url": "https://example.com/"}]})
         await hub.handle(send("look it up") | {"model": "claude-opus-5-5"})
+        await approve_navigation(hub)
         await settle(hub)
         assert (ghost_chat.WORKER_PROMPT, "claude-sonnet-5-5", "low") in hub.made
 
@@ -583,6 +676,7 @@ def test_bots_run_sonnet_on_low_and_mia_runs_the_picked_model_on_medium(monkeypa
             args.extend(cmd)
             raise RuntimeError("stop here")
         monkeypatch.setattr(ghost_chat.shutil, "which", lambda b: b)
+        monkeypatch.setattr(ghost_chat.claude_setup, "binary", lambda: "/verified/claude")
         monkeypatch.setattr(ghost_chat.asyncio, "create_subprocess_exec", spawn)
         try:
             await ghost_chat.ClaudeSession("claude-opus-5-5", "plan").turn("hi")

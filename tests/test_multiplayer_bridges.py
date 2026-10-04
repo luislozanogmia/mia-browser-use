@@ -36,6 +36,8 @@ class ScriptedExtension:
     def __init__(self, bridge: BridgeServer, tab_id: int):
         self.bridge = bridge
         self.tab_id = tab_id
+        self.tab_url = SHEET
+        self.read_url_override = None
         self.commands: list[tuple[str, dict]] = []
         self.pushed: list[dict] = []
         self.changed = asyncio.Event()
@@ -48,9 +50,11 @@ class ScriptedExtension:
         command, args = msg["command"], msg.get("args", {})
         self.commands.append((command, args))
         self.changed.set()
-        meta = {"tab_id": self.tab_id, "url": SHEET, "title": "Q4 budget"}
+        meta = {"tab_id": self.tab_id, "url": self.tab_url, "title": "Q4 budget"}
         if command == "ghost_tab_list":
-            result = {"tabs": [{"id": self.tab_id, "url": SHEET, "title": "Q4 budget", "active": True}]}
+            result = {"tabs": [{"id": self.tab_id, "url": self.tab_url, "title": "Q4 budget", "active": True}]}
+        elif command == "ghost_read":
+            result = {"url": self.read_url_override or self.tab_url, "title": "Q4 budget", "content": "Visible cells"}
         elif command == "ghost_fill":
             result = {"filled": True, "tag": "input", "anchor": {"selector": "#B2", "text": "", "rect": {"x": 10, "y": 20, "w": 80, "h": 22}}}
         elif command == "ghost_suggest":
@@ -103,10 +107,49 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(loop(), timeout)
 
     async def _share(self):
-        luis, luis_link, _ = self.machines["luis"]
-        _, ana_link, _ = self.machines["ana"]
+        luis, luis_link, luis_ext = self.machines["luis"]
+        ana, ana_link, ana_ext = self.machines["ana"]
         await luis.execute("room_share", {"url": SHEET, "title": "Q4 budget"}, 10)
         await self._until(lambda: ana_link.is_shared(SHEET) and luis_link.is_shared(SHEET))
+        for bridge, ext in ((luis, luis_ext), (ana, ana_ext)):
+            await bridge._extension_event({"type": "room_access", "tab_id": ext.tab_id, "url": SHEET, "accepted": True})
+
+    async def test_unaccepted_page_cannot_attach_to_matching_local_tab(self):
+        luis, _, luis_ext = self.machines["luis"]
+        ana, ana_link, _ = self.machines["ana"]
+        await ana.execute("room_share", {"url": SHEET, "title": "Q4 budget"}, 10)
+        await self._until(lambda: ana_link.is_shared(SHEET) and luis.room.is_shared(SHEET))
+        self.assertEqual(await luis._tabs_showing(SHEET), [])
+        ok, approved = await luis.execute("room_approved_tabs", {}, 10)
+        self.assertTrue(ok)
+        self.assertEqual(approved["tabs"], [])
+        self.assertFalse([c for c, _ in luis_ext.commands if c == "ghost_show"])
+
+    async def test_room_read_rechecks_consent_and_actual_tab_address(self):
+        await self._share()
+        luis, _, ext = self.machines["luis"]
+        args = {"tab_id": ext.tab_id, "url": SHEET, "actor_id": "answer", "max_chars": 1000}
+        ok, page = await luis.execute("room_read", args, 10)
+        self.assertTrue(ok)
+        self.assertEqual(page["content"], "Visible cells")
+        ext.read_url_override = "https://bank.example/account"
+        with self.assertRaisesRegex(Exception, "ROOM_ACCESS_DENIED"):
+            await luis.execute("room_read", args, 10)
+        ext.read_url_override = None
+        ext.tab_url = "https://bank.example/account"
+        with self.assertRaisesRegex(Exception, "ROOM_ACCESS_DENIED"):
+            await luis.execute("room_read", args, 10)
+        self.assertEqual(len([c for c, _ in ext.commands if c == "ghost_read"]), 2)
+
+    async def test_query_change_requires_fresh_tab_acceptance(self):
+        await self._share()
+        luis, _, ext = self.machines["luis"]
+        ext.tab_url = SHEET.replace("#gid=0", "?account=other#gid=0")
+        ok, approved = await luis.execute("room_approved_tabs", {}, 10)
+        self.assertTrue(ok)
+        self.assertEqual(approved["tabs"], [])
+        with self.assertRaisesRegex(Exception, "ROOM_ACCESS_DENIED"):
+            await luis.execute("room_read", {"tab_id": ext.tab_id, "url": SHEET}, 10)
 
     async def test_bot_on_one_machine_is_drawn_on_the_other(self):
         await self._share()

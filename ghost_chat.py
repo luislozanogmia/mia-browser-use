@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
 import re
 import shutil
 import tempfile
 import time
 from contextlib import suppress
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import claude_setup
 import chat_store
@@ -50,6 +52,8 @@ SHEET_CHARS = 32000  # a Google Sheet's cells come whole, so a bot can check a l
 
 TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_click", "ghost_fill", "ghost_key",
             "ghost_scroll", "ghost_wait"}
+ASK_TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_scroll", "ghost_wait"}
+ORDINARY_URL_PARAMS = {"q", "query", "search", "term", "page", "start", "offset", "sort", "filter", "view", "tab", "gid", "lang", "language"}
 # Words on a control that mean pressing it changes something for someone else.
 RISKY = re.compile(
     r"\b(send|submit|post|publish|tweet|reply|comment|share|buy|purchase|order|pay|checkout|check out|donate|"
@@ -203,6 +207,11 @@ def _why(exc: BaseException) -> str:
     return _text(str(exc), 300) or f"Something went wrong ({type(exc).__name__})"
 
 
+def external_url_needs_approval(url: str, page_hosts: set[str], page_text: str) -> bool:
+    """A model-chosen address needs a human check: encoded data evades text matching."""
+    return bool(url)
+
+
 SEARCH_FIELD = re.compile(r"\b(search|find|filter|look ?up|buscar|busca|rechercher|suche)\b", re.I)
 
 
@@ -294,7 +303,8 @@ class ClaudeSession:
     """One Claude process kept open for a conversation, run from an empty folder with no tools."""
 
     def __init__(self, model: str, system: str, effort: str = MIA_EFFORT, binary: str = "claude"):
-        self.model, self.system, self.effort, self.binary = model, system, effort, binary
+        self.model, self.system, self.effort = model, system, effort
+        self.binary = claude_setup.binary() if binary == "claude" else binary
         self.timeout = TURN_TIMEOUT  # seconds of silence before a turn fails; None waits for the model
         self.proc = None
         self.folder = None
@@ -302,14 +312,15 @@ class ClaudeSession:
     async def turn(self, text: str) -> str:
         if self.proc is None:
             self.folder = tempfile.TemporaryDirectory()
-            if not shutil.which(self.binary):
+            if not self.binary or not shutil.which(self.binary):
                 raise RuntimeError(NO_MODEL)
             self.proc = await asyncio.create_subprocess_exec(
                 self.binary, "-p", "--model", self.model, "--effort", self.effort, "--tools", "", "--strict-mcp-config",
                 "--no-session-persistence", "--system-prompt", self.system,
                 "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.folder.name, limit=8 * 1024 * 1024)
+                cwd=self.folder.name, limit=8 * 1024 * 1024,
+                env={**os.environ, "DISABLE_AUTOUPDATER": "1"})
         message = {"type": "user", "message": {"role": "user", "content": text}}
         self.proc.stdin.write((json.dumps(message) + "\n").encode())
         await self.proc.stdin.drain()
@@ -394,6 +405,9 @@ class Task:
         self.request = ""  # what the person wrote, word for word: links and names the plan may have dropped
         self.done_when = ""  # its goal: Mia sends it back to work if it reports before this is met
         self.found = ""  # the bot's running list of results, reported even if it fails or is stopped
+        self.page_hosts = {agent.host} if agent.host else set()  # origins whose page context this task has seen
+        self.page_text = ""  # bounded source text used to identify data copied into outbound URLs
+        self.control_approved = False  # owner granted this do task control of its tab
 
     @property
     def tab_id(self) -> int | None:
@@ -601,6 +615,7 @@ class ChatHub:
         text = _text(msg.get("text"), 2000)
         if not text:
             return
+        requested_mode = "do" if msg.get("mode") == "do" else "ask"
         run = "queue" if msg.get("run") == "queue" else "parallel"
         model = msg.get("model") if msg.get("model") in MODELS else DEFAULT_MODEL
         tab = msg.get("tab") if isinstance(msg.get("tab"), dict) else {}
@@ -637,6 +652,8 @@ class ChatHub:
         by_id = {t["id"]: t for t in open_tabs}
         tasks = []
         for t in plan["tasks"]:
+            if requested_mode == "ask":
+                t["kind"] = "ask"  # the person's mode is authoritative over the planner
             where = by_id.get(t["tab"])
             url = "" if where else t["url"]
             target = where["id"] if where else None if url else tab_id
@@ -647,11 +664,14 @@ class ChatHub:
             task.needs = [tasks[n] for n in t["needs"]]
             task.keep_open = t["keep_open"]
             task.done_when = t["done_when"]
+            if _host(tab.get("url")):
+                task.page_hosts.add(_host(tab.get("url")))
             tasks.append(task)
         if tasks and tab_id is None and any(t.tab_id is None and not t.url for t in tasks):
             self.say("mia", "I can't see your current tab, so tasks without a link can't start.")
         for task in tasks:
             task.context = context
+            task.page_text = context[:8000]
             task.request = text
             task.quiet = True  # bots report to Mia; she answers the person
             task.job = asyncio.create_task(self.work(task))
@@ -921,6 +941,9 @@ class ChatHub:
                 task.status, task.note = "working", "starting"
                 await self.publish()
                 if task.own_tab:
+                    if external_url_needs_approval(task.url, task.page_hosts, task.page_text) and task.url not in task.request:
+                        if not await self.wait_for_approval(task, f"Open {_text(task.url, 150)}? This sends the address to another site."):
+                            raise RuntimeError("The person rejected opening that site")
                     ok, value = await self.call("ghost_tab_open", {"url": task.url, "actor_id": task.agent.id})
                     if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
                         raise RuntimeError(f"Couldn't open {task.url}: {value}")
@@ -932,7 +955,7 @@ class ChatHub:
                 if task.tab_id is None:
                     raise RuntimeError("No tab to work on")
                 await self.show(task, "working")
-                allowed = TOOLS
+                allowed = ASK_TOOLS if task.kind == "ask" else TOOLS
                 system = WORKER_PROMPT
                 session = self.session(BOT_MODEL, system, BOT_EFFORT)
                 session.timeout = None  # a long job waits for the model; Stop is how it ends early
@@ -1037,6 +1060,18 @@ class ChatHub:
         args = {k: v for k, v in args.items() if k not in {"tab_id", "actor_id", "human_ok", "script", "password"}}
         return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id, "human_ok": True}
 
+    async def wait_for_approval(self, task: Task, question: str, choice: Any = None) -> bool:
+        task.status, task.question = "needs_you", question
+        task.approval = asyncio.get_running_loop().create_future()
+        if task.tab_id is not None:
+            await self.show(task, "working", choice=choice, label=f"{task.label} · waiting for you")
+        await self.publish()
+        await self.tell_page(task, question)
+        approved = await task.approval
+        task.status, task.question, task.approval = "working", "", None
+        await self.publish()
+        return approved
+
     async def act(self, task: Task, step: dict, allowed: set[str]) -> str:
         tool = step.get("tool") if isinstance(step.get("tool"), str) else ""
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
@@ -1045,17 +1080,16 @@ class ChatHub:
             return f"Refused: {refused}"
         task.note = _text(step.get("note"), 80) or tool.removeprefix("ghost_")
         question = needs_approval(tool, args, task.elements, _text(step.get("confirm"), 200))
+        if tool in {"ghost_vacuum", "ghost_navigate"}:
+            if external_url_needs_approval(args.get("url", ""), task.page_hosts, task.page_text):
+                question = f"Open {_text(args.get('url'), 150)}? This sends the address to that site."
+        if task.kind == "do" and tool in {"ghost_click", "ghost_fill", "ghost_key", "ghost_navigate", "ghost_vacuum"} and not task.control_approved:
+            question = question or f"Let {task.label} change this tab for “{task.title}”?"
         if question:
-            task.status, task.question = "needs_you", question
-            task.approval = asyncio.get_running_loop().create_future()
-            await self.show(task, "working", choice=args.get("choice"), label=f"{task.label} · waiting for you")
-            await self.publish()
-            await self.tell_page(task, question)
-            approved = await task.approval
-            task.status, task.question, task.approval = "working", "", None
-            if not approved:
-                await self.publish()
+            if not await self.wait_for_approval(task, question, args.get("choice")):
                 return "The person rejected that action. Do not try it again; finish another way or stop with done."
+            if task.kind == "do":
+                task.control_approved = True
         await self.publish()
         if tool in {"ghost_vacuum", "ghost_navigate"} and not task.own_tab:
             await self.move_to_own_tab(task, args["url"])
@@ -1074,6 +1108,9 @@ class ChatHub:
             return f"Error from {tool}: {_text(value, 400)}"
         if tool in {"ghost_read", "ghost_vacuum"} and isinstance(value, dict):
             task.elements = {int(n): line for n, line in ELEMENT_LINE.findall(str(value.get("content") or ""))}
+            if value.get("content") and _host(value.get("url")):
+                task.page_hosts.add(_host(value.get("url")))
+                task.page_text = (task.page_text + "\n" + str(value["content"]))[-32000:]
         elif tool in {"ghost_navigate", "ghost_click", "ghost_key"}:
             task.elements = {} if tool == "ghost_navigate" else task.elements
         return page_block(tool, value)

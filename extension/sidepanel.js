@@ -411,6 +411,24 @@ function updateSettings(info) {
   if (info.room) {
     const count = info.room.shared.length;
     $("roomLabel").textContent = `In a room as ${info.room.me.name || info.room.me.id} · ${count} shared page${count === 1 ? "" : "s"}`;
+    const invites = $("roomInvites");
+    invites.replaceChildren();
+    const accepted = new Set(info.room.accepted || []);
+    for (const page of info.room.pages || []) {
+      if (!page?.url || accepted.has(page.url)) continue;
+      const row = el("div", { className: "room-invite" });
+      row.append(el("strong", { textContent: page.title || hostOf(page.url) || "Shared page" }),
+                 el("small", { textContent: page.url }));
+      const actions = el("div", { className: "room-invite-actions" });
+      for (const [label, mode] of [["Open page", "new"], ["Use current tab", "current"]]) {
+        const button = el("button", { type: "button", textContent: label });
+        button.addEventListener("click", () => setting({ type: "accept-shared-page", url: page.url, mode }, 500));
+        actions.append(button);
+      }
+      row.append(actions);
+      invites.append(row);
+    }
+    invites.hidden = !invites.childElementCount;
   }
   // Offer only what applies to this tab.
   $("shareBtn").hidden = Boolean(info.tab_shared);
@@ -428,7 +446,9 @@ function refreshSettings() {
 function setting(message, delay = 300) {
   $("error").textContent = "";
   chrome.runtime.sendMessage(message, result => {
-    if (message.type.endsWith("share-tab") && !result?.ok) $("error").textContent = result?.error || "Could not reach the room";
+    if ((message.type.endsWith("share-tab") || message.type === "accept-shared-page") && !result?.ok) {
+      $("error").textContent = result?.error || "Could not reach the room";
+    }
     setTimeout(refreshSettings, delay);
   });
 }

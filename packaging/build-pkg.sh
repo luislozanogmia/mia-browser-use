@@ -6,6 +6,9 @@
 #
 #   packaging/build-pkg.sh
 #
+# Required for a distributable package:
+#   GHOST_SIGN_APP, GHOST_SIGN_INSTALLER, GHOST_NOTARY_PROFILE.
+# Set GHOST_DEV_UNSIGNED=1 only for a local test package, which is named UNSIGNED.
 # Optional environment:
 #   GHOST_WEB_STORE_ID   the extension's Chrome Web Store id. Chrome then offers the
 #                        extension by itself, and the store version may start Ghost.
@@ -21,8 +24,15 @@ ROOT="$BUILD/root"
 GHOST="/Library/Application Support/Ghost"
 STAGE="$ROOT$GHOST"
 VERSION="$(python3 -c "import json;print(json.load(open('$REPO/extension/manifest.json'))['version'])")"
-PY_VERSION="${GHOST_PYTHON_VERSION:-3.13}"
-OUT="$REPO/build/Mia-Browser-Use-$VERSION.pkg"
+PY_VERSION="3.13.12"
+if [ "${GHOST_DEV_UNSIGNED:-}" != "1" ]; then
+  : "${GHOST_SIGN_APP:?Set GHOST_SIGN_APP to sign the bundled programs}"
+  : "${GHOST_SIGN_INSTALLER:?Set GHOST_SIGN_INSTALLER to sign the package}"
+  : "${GHOST_NOTARY_PROFILE:?Set GHOST_NOTARY_PROFILE to notarize the package}"
+fi
+SUFFIX=""
+[ "${GHOST_DEV_UNSIGNED:-}" = "1" ] && SUFFIX="-UNSIGNED"
+OUT="$REPO/build/Mia-Browser-Use-$VERSION$SUFFIX.pkg"
 
 rm -rf "$BUILD" && mkdir -p "$STAGE/app"
 
@@ -33,7 +43,7 @@ PY_SRC="$(cd "$PY_SRC" && pwd -P)"
 cp -R "$PY_SRC" "$STAGE/python"
 rm -f "$STAGE"/python/lib/python*/EXTERNALLY-MANAGED
 PY="$STAGE/python/bin/python3"
-uv pip install --quiet --python "$PY" -r "$REPO/requirements.txt"
+uv pip install --quiet --python "$PY" --require-hashes --only-binary :all: -r "$HERE/requirements.lock"
 
 echo "→ Ghost $VERSION"
 for f in "$REPO"/*.py "$REPO/mia-browser-use"; do cp "$f" "$STAGE/app/"; done

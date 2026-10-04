@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -178,7 +179,11 @@ def claude_run(model: str, binary: str = "claude", timeout: int = 90, system: st
     No tools by default. Page answers get web search and fetch (WEB_TOOLS); the
     prompt keeps page data out of the addresses it opens."""
     def run(prompt: str, image_data: str | None = None) -> str:
-        command = [binary, "-p", "--model", model, "--tools", tools, "--strict-mcp-config",
+        from claude_setup import binary as installed_claude
+        executable = installed_claude() if binary == "claude" else binary
+        if not executable:
+            raise RuntimeError("Verified Claude Code is not installed")
+        command = [executable, "-p", "--model", model, "--tools", tools, "--strict-mcp-config",
                    "--no-session-persistence", "--system-prompt", system]
         if effort:
             command += ["--effort", effort]
@@ -194,7 +199,8 @@ def claude_run(model: str, binary: str = "claude", timeout: int = 90, system: st
             command += ["--output-format", "text"]
         with tempfile.TemporaryDirectory() as empty:
             try:
-                result = subprocess.run(command, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=empty)
+                result = subprocess.run(command, input=prompt, capture_output=True, text=True, timeout=timeout,
+                                        cwd=empty, env={**os.environ, "DISABLE_AUTOUPDATER": "1"})
             except FileNotFoundError:
                 raise RuntimeError(NO_MODEL) from None
         if result.returncode != 0:
@@ -288,7 +294,7 @@ class AskBot:
 
     def tab_for(self, url: str) -> int | None:
         key = page_key(url)
-        tabs = (self._result("ghost_tab_list", {}) or {}).get("tabs", [])
+        tabs = (self._result("room_approved_tabs", {}) or {}).get("tabs", [])
         return next((t["id"] for t in tabs if page_key(t.get("url")) == key), None)
 
     def show(self, tab_id: int, ask: dict, status: str) -> None:
@@ -322,10 +328,11 @@ class AskBot:
             return None
         self.show(tab_id, ask, "working")
         try:
-            # The page is open here, so the model can see what surrounds the selection.
-            page = self._result("ghost_read", {"actor_id": self.actor_id, "tab_id": tab_id, "max_chars": READ_CHARS})
+            # The bridge rechecks consent and the tab URL before and after the read.
+            page = self._result("room_read", {"actor_id": self.actor_id, "tab_id": tab_id,
+                                              "url": ask.get("url"), "max_chars": READ_CHARS})
         except Exception:
-            page = None
+            return None
         if ask.get("image"):
             # The picture of a cropped area stays on the bridge where it was asked.
             try:
@@ -398,7 +405,7 @@ class AskBot:
 
     def keep_company(self, shared_urls: list[str]) -> None:
         """Wait in the corner of every shared page open here (Follow me brings pages here)."""
-        tabs = (self._result("ghost_tab_list", {}) or {}).get("tabs", [])
+        tabs = (self._result("room_approved_tabs", {}) or {}).get("tabs", [])
         open_here = {}
         for url in shared_urls:
             key = page_key(url)

@@ -34,6 +34,12 @@ button.room-pill { border: 0; cursor: text; }
 input.room-pill { border: 1px solid var(--amber-line); outline: none; font: inherit; font-size: 11px; width: 120px; }
 .room-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--amber-tint); color: var(--amber-ink);
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.room-invites { display: flex; flex-direction: column; gap: 8px; }
+.room-invite { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface); overflow-wrap: anywhere; }
+.room-invite strong { display: block; font-size: 12px; }
+.room-invite small { display: block; color: var(--muted); margin: 2px 0 6px; }
+.room-invite-actions { display: flex; gap: 6px; }
+.room-invite-actions button { flex: 1; padding: 5px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--tint); }
 .faces { display: flex; }
 .faces span { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--surface); margin-left: -5px; }
 .faces span:first-child { margin-left: 0; }

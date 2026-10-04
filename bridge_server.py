@@ -53,7 +53,7 @@ from bridge_auth import (
 )
 from bridge_auth import _request_message
 from ghost_tool_defs import TOOL_NAMES
-from ghost_room import clean_language
+from ghost_room import clean_language, page_key
 from reel_story import write_story
 from chat_store import ChatStore
 from ghost_chat import ChatHub
@@ -79,7 +79,7 @@ MAX_HTTP_BODY_BYTES = 1024 * 1024
 MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024
 WS_NONCE_BYTES = 32
 # room_* commands are answered by the bridge itself and are not model tools.
-ROOM_COMMANDS = {"ghost_room", "room_share", "room_unshare", "room_resolve", "room_ask_image", "room_report"}
+ROOM_COMMANDS = {"ghost_room", "room_share", "room_unshare", "room_resolve", "room_ask_image", "room_report", "room_approved_tabs", "room_read"}
 MAX_REPORT_CHARS = 200_000
 MAX_ASK_IMAGE_CHARS = 1024 * 1024  # a cropped area, as a JPEG data URL
 MAX_ASK_IMAGES = 20
@@ -96,6 +96,7 @@ class BridgeServer:
         # Optional RoomLink; without it Ghost is single-machine as before.
         self.room = room
         self.tab_urls = {}  # tab id -> url, from command results and tab events
+        self.room_accepted_tabs = {}  # tab id -> exact URL accepted in this Chrome
         # Pictures of cropped areas asked about here. They stay on this machine:
         # the relay only carries the question and where the area is.
         self.ask_images = {}
@@ -219,7 +220,7 @@ class BridgeServer:
                 if msg.get("type") == "ask_cancel" and isinstance(msg.get("id"), str):
                     asyncio.get_running_loop().create_task(self.chat.cancel_ask(msg["id"][:64]))
                     continue
-                if msg.get("type") in {"human", "tab_ready", "share", "unshare", "resolve", "ask"}:
+                if msg.get("type") in {"human", "tab_ready", "share", "unshare", "resolve", "ask", "room_access"}:
                     asyncio.get_running_loop().create_task(self._extension_event(msg))
                     continue
 
@@ -230,6 +231,7 @@ class BridgeServer:
             if self.extension_ws is websocket:
                 self.extension_ws = None
                 self.connected = False
+                self.room_accepted_tabs.clear()
                 # Fail all pending requests
                 for future in self.pending.values():
                     if not future.done():
@@ -458,7 +460,8 @@ class BridgeServer:
         from ghost_room import page_key
 
         key = page_key(url)
-        return next((tab for tab, seen in self.tab_urls.items() if key and page_key(seen) == key), None)
+        return next((tab for tab, seen in self.tab_urls.items()
+                     if key and page_key(seen) == key and self.room_accepted_tabs.get(tab) == seen), None)
 
     def _remember_tab(self, meta):
         if isinstance(meta, dict) and isinstance(meta.get("tab_id"), int) and isinstance(meta.get("url"), str):
@@ -510,7 +513,7 @@ class BridgeServer:
         if self.connected and self.extension_ws and self.room:
             with suppress(Exception):
                 await self.extension_ws.send(json.dumps({
-                    "type": "shared_pages", "urls": list(self.room.shared), "me": self.room.me,
+                    "type": "shared_pages", "pages": list(self.room.shared.values()), "me": self.room.me,
                 }))
 
     async def _tabs_showing(self, url):
@@ -521,7 +524,8 @@ class BridgeServer:
             return []
         listing = await self.send_command("ghost_tab_list", {}, timeout=10)
         tabs = (listing.get("result") or {}).get("tabs", [])
-        return [t["id"] for t in tabs if isinstance(t, dict) and page_key(t.get("url")) == key]
+        return [t["id"] for t in tabs if isinstance(t, dict) and page_key(t.get("url")) == key
+                and self.room_accepted_tabs.get(t.get("id")) == t.get("url")]
 
     def _show_args(self, presence, tab_id):
         actor = presence["actor"]
@@ -548,9 +552,9 @@ class BridgeServer:
             tab_ids = tab_ids if tab_ids is not None else await self._tabs_showing(presence.get("url"))
             for tab_id in tab_ids:
                 if presence.get("status") == "gone":
-                    await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": presence["actor"]["id"], "clear": True}, timeout=10)
+                    await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": presence["actor"]["id"], "clear": True, "room_only": True}, timeout=10)
                 else:
-                    await self.send_command("ghost_show", self._show_args(presence, tab_id), timeout=10)
+                    await self.send_command("ghost_show", {**self._show_args(presence, tab_id), "room_only": True}, timeout=10)
         except Exception as exc:
             print(f"[room] could not draw {presence.get('actor', {}).get('id')}: {exc}")
 
@@ -558,7 +562,7 @@ class BridgeServer:
         try:
             tab_ids = tab_ids if tab_ids is not None else await self._tabs_showing(suggestion.get("url"))
             for tab_id in tab_ids:
-                args = {"tab_id": tab_id, "id": suggestion["id"], "clear": clear}
+                args = {"tab_id": tab_id, "id": suggestion["id"], "clear": clear, "room_only": True}
                 if not clear:
                     args.update({
                         "actor": suggestion["actor"], "title": suggestion.get("title", ""),
@@ -600,7 +604,7 @@ class BridgeServer:
             for tab_id, url in list(self.tab_urls.items()):
                 if self.room.is_shared(url):
                     with suppress(Exception):
-                        await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": message["actor"]["id"], "clear": True}, timeout=10)
+                        await self.send_command("ghost_show", {"tab_id": tab_id, "actor_id": message["actor"]["id"], "clear": True, "room_only": True}, timeout=10)
         elif kind == "suggestion":
             if message.get("reply_to"):
                 await self._draw_ask({"id": message["reply_to"], "url": message.get("url"), "by": message["actor"]}, clear=True)
@@ -663,14 +667,20 @@ class BridgeServer:
         tab_id, url = msg.get("tab_id"), msg.get("url")
         if isinstance(tab_id, int) and isinstance(url, str):
             self.tab_urls[tab_id] = url
-        if kind == "tab_ready" and self.room.is_shared(url):
+        if kind == "room_access" and isinstance(tab_id, int):
+            key = page_key(url)
+            if msg.get("accepted") is True and key and self.room.is_shared(url):
+                self.room_accepted_tabs[tab_id] = url
+            else:
+                self.room_accepted_tabs.pop(tab_id, None)
+        elif kind == "tab_ready" and self.room.is_shared(url) and self.room_accepted_tabs.get(tab_id) == url:
             for presence in self.room.presence_for(url):
                 await self._draw(presence, [tab_id])
             for suggestion in self.room.suggestions_for(url):
                 await self._draw_suggestion(suggestion, [tab_id])
             for ask in self.room.asks_for(url):
                 await self._draw_ask(ask, [tab_id])
-        elif kind == "human" and self.room.is_shared(url):
+        elif kind == "human" and self.room.is_shared(url) and self.room_accepted_tabs.get(tab_id) == url:
             await self.room.send({
                 "action": "presence", "actor_id": self.room.me["id"], "url": url,
                 "status": msg.get("status") if msg.get("status") in {"working", "idle"} else "working",
@@ -726,6 +736,32 @@ class BridgeServer:
                 "asks": [{**a, "image": True} if a.get("id") in self.ask_images else a for a in self.room.asks.values()],
                 "decisions_on_your_suggestions": [d for d in self.room.decisions.values() if d["actor"]["id"] in mine],
             }
+        if command == "room_approved_tabs":
+            listing = await self.send_command("ghost_tab_list", {}, timeout=10)
+            tabs = (listing.get("result") or {}).get("tabs", [])
+            return {"tabs": [t for t in tabs if isinstance(t, dict) and isinstance(t.get("id"), int)
+                             and self.room_accepted_tabs.get(t["id"]) == t.get("url")
+                             and self.room.is_shared(t.get("url"))]}
+        if command == "room_read":
+            tab_id = args.get("tab_id") if isinstance(args, dict) else None
+            key = page_key(args.get("url")) if isinstance(args, dict) else None
+            if not isinstance(tab_id, int) or isinstance(tab_id, bool) or not key or not self.room.is_shared(key):
+                raise Exception("ROOM_ACCESS_DENIED: page is not shared")
+            accepted_url = self.room_accepted_tabs.get(tab_id)
+            if not accepted_url or page_key(accepted_url) != key:
+                raise Exception("ROOM_ACCESS_DENIED: this tab was not accepted")
+            listing = await self.send_command("ghost_tab_list", {}, timeout=10)
+            tabs = (listing.get("result") or {}).get("tabs", [])
+            if not any(t.get("id") == tab_id and t.get("url") == accepted_url for t in tabs if isinstance(t, dict)):
+                raise Exception("ROOM_ACCESS_DENIED: tab moved away")
+            result = await self.send_command("ghost_read", {
+                "tab_id": tab_id, "actor_id": args.get("actor_id"),
+                "max_chars": max(1, min(int(args.get("max_chars") or 60000), 60000)),
+            }, timeout=45)
+            page = result.get("result") or {}
+            if "error" in result or page.get("url") != accepted_url or self.room_accepted_tabs.get(tab_id) != accepted_url:
+                raise Exception("ROOM_ACCESS_DENIED: tab changed during read")
+            return page
         if command in {"room_share", "room_unshare"}:
             url = args.get("url")
             if not isinstance(url, str):

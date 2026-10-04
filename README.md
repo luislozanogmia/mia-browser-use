@@ -17,8 +17,11 @@ for browser credentials and has no command to export a browser session.
 
 ## Install
 
-For everyday use, build the Mac installer with `packaging/build-pkg.sh` and
-double-click `Mia-Browser-Use-<version>.pkg`. It brings its own Python, starts
+For everyday use, build the signed and notarized Mac installer with
+`packaging/build-pkg.sh` and double-click `Mia-Browser-Use-<version>.pkg`.
+The build requires the signing identities and notary profile described in the
+script; `GHOST_DEV_UNSIGNED=1` makes a clearly labeled local test package.
+The installer brings its own pinned Python and locked dependencies, starts
 Mia by itself, and opens a page in Chrome that shows how to add the extension.
 
 For development:
@@ -55,7 +58,8 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
 - **Rooms:** share a page with other people and their bots, and see each
   other's cursors and answers (`mia-browser-use room --help`).
 
-Mia answers with your own Claude account through Claude Code.
+Mia answers with your own Claude account through Claude Code. See the
+[third-party service disclosure](TERMS.md) for how Mia installs and uses it.
 
 ## Hermes Desktop setup
 

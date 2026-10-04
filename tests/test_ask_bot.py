@@ -12,20 +12,21 @@ ASK = {
 
 
 class FakeBridge:
-    def __init__(self, asks):
+    def __init__(self, asks, accepted=True):
         self.asks = asks
+        self.accepted = accepted
         self.calls = []
 
     def __call__(self, command, args=None, timeout=None):
         self.calls.append((command, args))
         if command == "ghost_room":
             return {"asks": self.asks}
-        if command == "ghost_read":
+        if command == "room_read":
             return {"title": "Dinosaur - Wikipedia", "content": "Intro. " * 3000 + "Research by Baron et al. changed things. " + "Tail. " * 3000}
         if command == "room_ask_image":
             return {"image": "data:image/jpeg;base64,QUJD"}
-        if command == "ghost_tab_list":
-            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology"}]}
+        if command == "room_approved_tabs":
+            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology"}] if self.accepted else []}
         return {}
 
 
@@ -59,6 +60,11 @@ class AskBotTests(unittest.TestCase):
         bridge = FakeBridge([{**ASK, "url": "https://example.com/other"}])
         AskBot("claude", lambda ask, page=None: "x", call=bridge).poll()
         self.assertFalse([c for c, _ in bridge.calls if c == "ghost_suggest"])
+
+    def test_unaccepted_matching_tab_is_never_read(self):
+        bridge = FakeBridge([ASK], accepted=False)
+        AskBot("claude", lambda ask, page=None: "x", call=bridge).poll()
+        self.assertFalse([c for c, _ in bridge.calls if c in {"room_read", "ghost_suggest"}])
 
     def test_model_sees_the_page_around_the_selection(self):
         seen = {}

@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from ghost_room import ID_RE, page_key
+from ghost_room import ID_RE, page_key, room_safe_href
 
 RECONNECT_MIN = 1.0
 RECONNECT_MAX = 30.0
@@ -164,7 +164,15 @@ class RoomLink:
         if self._ws is None or not self.connected:
             return
         try:
-            await self._ws.send(json.dumps(message, ensure_ascii=False))
+            outgoing = dict(message)
+            if "url" in outgoing:
+                outgoing["url"] = room_safe_href(outgoing["url"]) if outgoing.get("action") == "ask" else page_key(outgoing["url"])
+            if isinstance(outgoing.get("page"), dict):
+                outgoing["page"] = {**outgoing["page"], "url": page_key(outgoing["page"].get("url"))}
+            if isinstance(outgoing.get("links"), list):
+                outgoing["links"] = [{**link, "href": room_safe_href(link.get("href"))}
+                                     for link in outgoing["links"] if isinstance(link, dict) and room_safe_href(link.get("href"))]
+            await self._ws.send(json.dumps(outgoing, ensure_ascii=False))
         except Exception:
             pass
 

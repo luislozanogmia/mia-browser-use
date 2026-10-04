@@ -629,10 +629,36 @@
   // the address without loading a new page. A question and its answer belong
   // to the address they were asked on, and come back with it (Back).
 
-  const here = () => location.href.split("#")[0];
+  // Match the room's URL shape without exposing credentials in query parameters.
+  // Keep this list in sync with ROOM_QUERY_KEYS in ghost_room.py.
+  const ROOM_QUERY_KEYS = new Set([
+    "q", "query", "search", "term", "page", "start", "offset", "sort",
+    "filter", "view", "tab", "gid", "lang", "language",
+  ]);
+  const TOKENISH_VALUE = /^(?:[A-Za-z0-9_-]{32,}|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;
+
+  function roomHref(raw) {
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+      const key = `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "") || "/"}`;
+      const safe = new URLSearchParams();
+      for (const [name, value] of url.searchParams) {
+        if (ROOM_QUERY_KEYS.has(name.toLowerCase()) && value.length <= 128 && !TOKENISH_VALUE.test(value)) {
+          safe.append(name, value);
+        }
+      }
+      const query = safe.toString();
+      return query ? `${key}?${query}` : key;
+    } catch {
+      return "";
+    }
+  }
+
+  const here = () => roomHref(location.href);
 
   function showIfHere(card) {
-    const href = typeof card.spec.href === "string" ? card.spec.href.split("#")[0] : "";
+    const href = typeof card.spec.href === "string" ? roomHref(card.spec.href) : "";
     card.away = Boolean(href) && href !== here();
     card.node.style.display = card.away ? "none" : "";
     if (card.away) card.ring.style.display = "none";

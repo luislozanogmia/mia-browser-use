@@ -186,7 +186,7 @@ def run_room_command(args) -> Any:
         from ask_bot import AskBot, claude_answer, claude_report
 
         validate_actor(args.actor)
-        bot = AskBot(args.actor, claude_answer(args.model, args.claude), color=args.color,
+        bot = AskBot(args.actor, claude_answer(args.model, args.claude, room_only=True), color=args.color,
                      report=claude_report(args.model, args.claude),
                      label=f"{args.actor.capitalize()} · {args.model}")
         bot.run_forever()

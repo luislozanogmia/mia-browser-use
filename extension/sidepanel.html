@@ -39,10 +39,12 @@
     <div id="roomBox">
       <p class="section-label" id="roomLabel"></p>
       <button class="wide share" id="shareBtn">Share this tab with the room</button>
+      <label class="check"><input type="checkbox" id="shareFullLink">
+        <span>Include full link<small>Let room members open this exact page. Its path and search terms will be visible to them.</small></span></label>
       <button class="wide" id="unshareBtn">Stop sharing this tab</button>
       <div id="roomInvites" class="room-invites" hidden></div>
       <label class="check"><input type="checkbox" id="followMe">
-        <span>Follow me<small>Bots come with you: the tab you're on is shared with the room as you move. Everyone in the room sees those pages.</small></span></label>
+        <span>Follow me<small>Bots come with you. Room members see the site, but not the page address unless you share its full link.</small></span></label>
       <label class="check"><input type="checkbox" id="reelMode">
         <span>Reel mode<small>Every shared page you visit and every answer a bot gives is saved as a screenshot, one below the other.</small></span></label>
       <label class="check"><input type="checkbox" id="immersive">

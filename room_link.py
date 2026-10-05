@@ -12,13 +12,15 @@ import asyncio
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from ghost_room import ID_RE, page_key, room_safe_href
+from ghost_room import ID_RE, page_key, room_origin, room_safe_href
 
 RECONNECT_MIN = 1.0
 RECONNECT_MAX = 30.0
+OPAQUE_PAGE_PREFIX = "https://room.invalid/p/"
 
 
 class RoomLink:
@@ -41,6 +43,7 @@ class RoomLink:
         self.on_message = on_message
         self.bots: dict[str, dict] = {}
         self.shared: dict[str, dict] = {}  # page key -> page
+        self.local_pages: dict[str, str] = {}  # local origin+path -> opaque room page URL
         self.presence: dict[str, dict] = {}  # remote actor id -> last presence
         self.members: dict[str, dict] = {}
         self.suggestions: dict[str, dict] = {}
@@ -143,19 +146,33 @@ class RoomLink:
                 self.decisions.pop(next(iter(self.decisions)))
 
     def is_shared(self, url: Any) -> bool:
-        key = page_key(url)
+        key = self.room_page(url)
         return bool(key and key in self.shared)
 
-    def presence_for(self, url: Any) -> list[dict]:
+    def room_page(self, url: Any) -> str | None:
         key = page_key(url)
+        return self.local_pages.get(key, key) if key else None
+
+    def bind_local(self, url: Any, room_url: Any) -> bool:
+        local, remote = page_key(url), page_key(room_url)
+        if not local or not remote or remote != room_url or not remote.startswith(OPAQUE_PAGE_PREFIX):
+            return False
+        page = self.shared.get(remote)
+        if page and page.get("origin") != room_origin(local):
+            return False
+        self.local_pages[local] = remote
+        return True
+
+    def presence_for(self, url: Any) -> list[dict]:
+        key = self.room_page(url)
         return [p for p in self.presence.values() if p.get("url") == key]
 
     def suggestions_for(self, url: Any) -> list[dict]:
-        key = page_key(url)
+        key = self.room_page(url)
         return [s for s in self.suggestions.values() if s.get("url") == key]
 
     def asks_for(self, url: Any) -> list[dict]:
-        key = page_key(url)
+        key = self.room_page(url)
         return [a for a in self.asks.values() if a.get("url") == key]
 
     # -- publishing -----------------------------------------------------------
@@ -165,14 +182,29 @@ class RoomLink:
             return
         try:
             outgoing = dict(message)
-            if "url" in outgoing:
-                outgoing["url"] = room_safe_href(outgoing["url"]) if outgoing.get("action") == "ask" else page_key(outgoing["url"])
-            if isinstance(outgoing.get("page"), dict):
-                outgoing["page"] = {**outgoing["page"], "url": page_key(outgoing["page"].get("url"))}
+            if outgoing.get("action") == "share" and isinstance(outgoing.get("page"), dict):
+                source = outgoing["page"]
+                local, origin = page_key(source.get("url")), room_origin(source.get("url"))
+                if not local or not origin:
+                    return
+                remote = source.get("room_url") or self.local_pages.get(local) or OPAQUE_PAGE_PREFIX + secrets.token_urlsafe(18)
+                if not isinstance(remote, str) or not remote.startswith(OPAQUE_PAGE_PREFIX) or page_key(remote) != remote:
+                    return
+                self.local_pages[local] = remote
+                outgoing["page"] = {"url": remote, "origin": origin, "title": origin,
+                                    **({"href": source["url"]} if source.get("share_link") is True else {})}
+            elif "url" in outgoing:
+                remote = self.room_page(outgoing["url"])
+                if not remote or not remote.startswith(OPAQUE_PAGE_PREFIX):
+                    return
+                outgoing["url"] = remote
             if isinstance(outgoing.get("links"), list):
                 outgoing["links"] = [{**link, "href": room_safe_href(link.get("href"))}
                                      for link in outgoing["links"] if isinstance(link, dict) and room_safe_href(link.get("href"))]
             await self._ws.send(json.dumps(outgoing, ensure_ascii=False))
+            if outgoing.get("action") == "unshare":
+                self.local_pages = {local: remote for local, remote in self.local_pages.items()
+                                    if remote != outgoing["url"]}
         except Exception:
             pass
 

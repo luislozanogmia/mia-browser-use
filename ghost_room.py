@@ -85,6 +85,15 @@ def page_key(url: Any) -> Optional[str]:
     return f"{parts.scheme}://{host}{parts.path.rstrip('/') or '/'}"
 
 
+def room_origin(url: Any) -> Optional[str]:
+    """The only site address sent for a private room invitation."""
+    key = page_key(url)
+    if not key:
+        return None
+    parts = urlsplit(key)
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
 def key_digest(key: str) -> bytes:
     return hashlib.sha256(key.encode()).digest()
 
@@ -136,18 +145,8 @@ TOKENISH_VALUE = re.compile(r"^(?:[A-Za-z0-9_-]{32,}|[A-Za-z0-9_-]+\.[A-Za-z0-9_
 
 
 def room_safe_href(url: Any) -> Optional[str]:
-    """Keep ordinary page navigation while withholding private query parameters from a room."""
-    key = page_key(url)
-    if not key:
-        return None
-    try:
-        pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True, max_num_fields=64)
-    except ValueError:
-        return key
-    safe = [(name, value) for name, value in pairs
-            if name.lower() in ROOM_QUERY_KEYS and len(value) <= 128 and not TOKENISH_VALUE.fullmatch(value)]
-    query = urlencode(safe)
-    return f"{key}?{query}" if query else key
+    """Keep linked sites usable without sending their path or search terms to a room."""
+    return room_origin(url)
 
 
 def page_href(url: Any, key: str) -> str:
@@ -463,7 +462,14 @@ class RoomHub:
         if key not in room.pages and len(room.pages) >= MAX_PAGES_PER_ROOM:
             raise RoomError("LIMIT", "Too many shared pages")
         by = next(iter(member.actors))
-        room.pages[key] = {"url": key, "title": _text(page.get("title"), 200), "by": by}
+        origin = room_origin(page.get("origin")) if page.get("origin") else None
+        if page.get("origin") and origin != page.get("origin"):
+            raise RoomError("INVALID", "page.origin must be a site origin")
+        href = page.get("href") if isinstance(page.get("href"), str) else None
+        if href and (not origin or room_origin(href) != origin or len(href) > 2048):
+            raise RoomError("INVALID", "page.href must belong to page.origin")
+        room.pages[key] = {"url": key, "title": _text(page.get("title"), 200), "by": by,
+                           **({"origin": origin} if origin else {}), **({"href": href} if href else {})}
         return self._to_all(room, {"type": "page", "event": "shared", "page": room.pages[key]})
 
     def _on_unshare(self, conn_id: str, message: dict) -> Outbound:
@@ -572,7 +578,7 @@ class RoomHub:
         humans = [a for a in member.actors.values() if a["kind"] == "human"]
         if not humans:
             raise RoomError("FORBIDDEN", "Only a human can ask")
-        key, _page = self._shared_page(room, message.get("url"))
+        key, page = self._shared_page(room, message.get("url"))
         question = _text(message.get("question"), 600)
         if not question:
             raise RoomError("INVALID", "question is required")
@@ -594,7 +600,7 @@ class RoomHub:
             "target": clean_anchor(message.get("target")) or (first["target"] if first else None),
             "text": _text(message.get("text"), 4000) or (first["text"] if first else ""),
             "question": question,
-            "href": page_href(message.get("url"), key),
+            "href": page.get("href") or page.get("origin") or page_href(message.get("url"), key),
             "thread": thread,
             "links": clean_links(message.get("links")) or (first["links"] if first else []),
             "language": clean_language(message.get("language")),

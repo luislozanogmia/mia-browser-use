@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bridge_server import BridgeServer
-from ghost_room import RoomHub, serve_room
+from ghost_room import RoomHub, page_key, serve_room
 from room_link import RoomLink
 
 KEY = "k" * 40
@@ -110,15 +110,22 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         luis, luis_link, luis_ext = self.machines["luis"]
         ana, ana_link, ana_ext = self.machines["ana"]
         await luis.execute("room_share", {"url": SHEET, "title": "Q4 budget"}, 10)
-        await self._until(lambda: ana_link.is_shared(SHEET) and luis_link.is_shared(SHEET))
+        room_url = luis_link.local_pages[page_key(SHEET)]
+        await self._until(lambda: ana_link.is_shared(room_url) and luis_link.is_shared(SHEET))
+        self.assertNotIn("/spreadsheets/", json.dumps(ana_link.shared[room_url]))
+        self.assertEqual(ana_link.shared[room_url]["origin"], "https://docs.google.com/")
+        self.assertTrue(ana_link.bind_local(SHEET, room_url))
         for bridge, ext in ((luis, luis_ext), (ana, ana_ext)):
-            await bridge._extension_event({"type": "room_access", "tab_id": ext.tab_id, "url": SHEET, "accepted": True})
+            await bridge._extension_event({"type": "room_access", "tab_id": ext.tab_id, "url": SHEET,
+                                           "room_url": room_url, "accepted": True})
+        return room_url
 
     async def test_unaccepted_page_cannot_attach_to_matching_local_tab(self):
         luis, _, luis_ext = self.machines["luis"]
         ana, ana_link, _ = self.machines["ana"]
         await ana.execute("room_share", {"url": SHEET, "title": "Q4 budget"}, 10)
-        await self._until(lambda: ana_link.is_shared(SHEET) and luis.room.is_shared(SHEET))
+        room_url = ana_link.local_pages[page_key(SHEET)]
+        await self._until(lambda: ana_link.is_shared(SHEET) and luis.room.is_shared(room_url))
         self.assertEqual(await luis._tabs_showing(SHEET), [])
         ok, approved = await luis.execute("room_approved_tabs", {}, 10)
         self.assertTrue(ok)
@@ -126,9 +133,9 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([c for c, _ in luis_ext.commands if c == "ghost_show"])
 
     async def test_room_read_rechecks_consent_and_actual_tab_address(self):
-        await self._share()
+        room_url = await self._share()
         luis, _, ext = self.machines["luis"]
-        args = {"tab_id": ext.tab_id, "url": SHEET, "actor_id": "answer", "max_chars": 1000}
+        args = {"tab_id": ext.tab_id, "url": room_url, "actor_id": "answer", "max_chars": 1000}
         ok, page = await luis.execute("room_read", args, 10)
         self.assertTrue(ok)
         self.assertEqual(page["content"], "Visible cells")
@@ -142,14 +149,14 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([c for c, _ in ext.commands if c == "ghost_read"]), 2)
 
     async def test_query_change_requires_fresh_tab_acceptance(self):
-        await self._share()
+        room_url = await self._share()
         luis, _, ext = self.machines["luis"]
         ext.tab_url = SHEET.replace("#gid=0", "?account=other#gid=0")
         ok, approved = await luis.execute("room_approved_tabs", {}, 10)
         self.assertTrue(ok)
         self.assertEqual(approved["tabs"], [])
         with self.assertRaisesRegex(Exception, "ROOM_ACCESS_DENIED"):
-            await luis.execute("room_read", {"tab_id": ext.tab_id, "url": SHEET}, 10)
+            await luis.execute("room_read", {"tab_id": ext.tab_id, "url": room_url}, 10)
 
     async def test_bot_on_one_machine_is_drawn_on_the_other(self):
         await self._share()

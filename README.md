@@ -57,6 +57,11 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
   only. **Make PDF** turns it into a report.
 - **Rooms:** share a page with other people and their bots, and see each
   other's cursors and answers (`mia-browser-use room --help`).
+  Room invitations show the site by default, using a private page ID rather
+  than sending its path or search terms. **Include full link** lets others
+  open the exact page and makes that address visible to the room. Room answer
+  bots use the accepted local page without web search; solo Mia chat keeps
+  its web research tools.
 
 Mia answers with your own Claude account through Claude Code. See the
 [third-party service disclosure](TERMS.md) for how Mia installs and uses it.

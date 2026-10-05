@@ -1109,7 +1109,7 @@ async function drawSuggestion(args) {
 
 let sharedPages = new Set();
 let sharedPageDetails = new Map();
-const acceptedSharedTabs = new Map(); // tab id -> exact URL explicitly chosen by this browser's owner
+const acceptedSharedTabs = new Map(); // tab id -> {url: exact local URL, roomUrl: opaque page ID}
 const manuallyShared = new Map(); // tab id -> page key shared from the side panel
 const stoppedByHuman = new Set(); // unshared from the side panel, so following leaves them alone
 let roomMe = null;
@@ -1125,21 +1125,39 @@ function pageKey(url) {
   }
 }
 
+function siteOrigin(url) {
+  try {
+    const u = new URL(url);
+    return ["http:", "https:"].includes(u.protocol) ? `${u.origin}/` : null;
+  } catch { return null; }
+}
+
+function newRoomPageUrl() {
+  return `https://room.invalid/p/${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
 function isShared(url) {
   const key = pageKey(url);
-  return Boolean(key && sharedPages.has(key));
+  return Boolean(key && [...acceptedSharedTabs.values()].some(entry =>
+    pageKey(entry.url) === key && sharedPages.has(entry.roomUrl)));
 }
 
 function isAcceptedTab(tab) {
-  return Boolean(tab && isShared(tab.url) && acceptedSharedTabs.get(tab.id) === tab.url);
+  const entry = tab && acceptedSharedTabs.get(tab.id);
+  const page = entry && sharedPageDetails.get(entry.roomUrl);
+  return Boolean(entry && page && entry.url === tab.url && siteOrigin(tab.url) === page.origin);
 }
 
-function setRoomAccess(tab, accepted) {
+function setRoomAccess(tab, accepted, roomUrl = null) {
   const key = pageKey(tab?.url);
   if (!Number.isInteger(tab?.id)) return;
-  if (accepted && key) acceptedSharedTabs.set(tab.id, tab.url);
+  const previous = acceptedSharedTabs.get(tab.id);
+  if (accepted && key && typeof roomUrl === "string" && roomUrl.startsWith("https://room.invalid/p/")) {
+    acceptedSharedTabs.set(tab.id, { url: tab.url, roomUrl });
+  }
   else acceptedSharedTabs.delete(tab.id);
-  toBridge({ type: "room_access", tab_id: tab.id, url: tab.url || "", accepted: Boolean(accepted && key) });
+  toBridge({ type: "room_access", tab_id: tab.id, url: tab.url || "",
+             room_url: roomUrl || previous?.roomUrl, accepted: acceptedSharedTabs.has(tab.id) });
 }
 
 async function tabMeta(tabId) {
@@ -1181,21 +1199,22 @@ async function untrackHuman(tabId) {
 async function setSharedPages(pages, me) {
   const before = sharedPages;
   sharedPageDetails = new Map((Array.isArray(pages) ? pages : [])
-    .filter(page => page && pageKey(page.url) === page.url)
+    .filter(page => page && typeof page.url === "string" && page.url.startsWith("https://room.invalid/p/")
+      && pageKey(page.url) === page.url && siteOrigin(page.origin) === page.origin)
     .map(page => [page.url, page]));
   sharedPages = new Set(sharedPageDetails.keys());
   roomMe = me && typeof me === "object" ? me : null;
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    const key = pageKey(tab.url);
-    if (acceptedSharedTabs.has(tab.id) && (!sharedPages.has(key) || acceptedSharedTabs.get(tab.id) !== tab.url)) {
+    const entry = acceptedSharedTabs.get(tab.id);
+    if (entry && (!sharedPages.has(entry.roomUrl) || entry.url !== tab.url)) {
       setRoomAccess(tab, false);
     }
-    if (key && before.has(key) && !sharedPages.has(key)) {
+    if (entry && before.has(entry.roomUrl) && !sharedPages.has(entry.roomUrl)) {
       // No longer shared: clean the page.
       await untrackHuman(tab.id);
     } else if (isAcceptedTab(tab)) {
-      setRoomAccess(tab, true); // restore bridge consent after a reconnect
+      setRoomAccess(tab, true, entry.roomUrl); // restore bridge consent after a reconnect
       await trackHuman(tab.id);
       ws?.send(JSON.stringify({ type: "tab_ready", tab_id: tab.id, url: tab.url }));
     }
@@ -1204,7 +1223,7 @@ async function setSharedPages(pages, me) {
 
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (!connected || !ws) return;
-  if (acceptedSharedTabs.has(tabId) && acceptedSharedTabs.get(tabId) !== tab.url) setRoomAccess(tab, false);
+  if (acceptedSharedTabs.has(tabId) && acceptedSharedTabs.get(tabId).url !== tab.url) setRoomAccess(tab, false);
   if (info.status !== "complete") return;
   if (isAcceptedTab(tab)) {
     ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
@@ -1219,11 +1238,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 let following = false;
 let followedUrl = null; // shared by following, so following may unshare it
 let followedTabId = null;
+let followedRoomUrl = null;
 
 async function leaveFollowedTab() {
   const keptByOwner = manuallyShared.get(followedTabId) === followedUrl;
-  if (followedUrl && !keptByOwner) {
-    toBridge({ type: "unshare", url: followedUrl });
+  if (followedRoomUrl && !keptByOwner) {
+    toBridge({ type: "unshare", url: followedRoomUrl });
   }
   if (Number.isInteger(followedTabId)) {
     const tab = await chrome.tabs.get(followedTabId).catch(() => null);
@@ -1234,18 +1254,16 @@ async function leaveFollowedTab() {
   }
   followedUrl = null;
   followedTabId = null;
+  followedRoomUrl = null;
 }
 
 async function followActiveTab() {
   if (!following || !connected) return;
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const key = tab && pageKey(tab.url);
-  if (!key || (key === followedUrl && tab.id === followedTabId && sharedPages.has(key) && isAcceptedTab(tab))) return;
-  const sharedBy = sharedPageDetails.get(key)?.by;
-  if (sharedBy && sharedBy !== roomMe?.id && !isAcceptedTab(tab)) {
-    await leaveFollowedTab();
-    return; // a participant's invitation still requires this owner's explicit acceptance
-  }
+  if (!key || (key === followedUrl && tab.id === followedTabId
+      && acceptedSharedTabs.get(tab.id)?.url === tab.url
+      && acceptedSharedTabs.get(tab.id)?.roomUrl === followedRoomUrl)) return;
   if (stoppedByHuman.has(key)) {
     // The human stopped sharing this page; following doesn't share it again.
     await leaveFollowedTab();
@@ -1253,10 +1271,14 @@ async function followActiveTab() {
   }
   // Leave the last followed page, unless the human shared it themselves.
   if (followedTabId !== tab.id || followedUrl !== key) await leaveFollowedTab();
+  const accepted = acceptedSharedTabs.get(tab.id);
+  if (isAcceptedTab(tab) && sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id) return;
   followedUrl = key;
   followedTabId = tab.id;
-  setRoomAccess(tab, true);
-  if (!sharedPages.has(key)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, title: tab.title });
+  followedRoomUrl = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : newRoomPageUrl();
+  if (!followedRoomUrl) followedRoomUrl = newRoomPageUrl();
+  setRoomAccess(tab, true, followedRoomUrl);
+  if (!sharedPages.has(followedRoomUrl)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: followedRoomUrl });
 }
 
 async function setFollow(on) {
@@ -1357,7 +1379,8 @@ function toBridge(message) {
 // A closed tab takes its bot off Mia's list, whether or not the panel is open.
 chrome.tabs.onRemoved.addListener(tabId => {
   if (acceptedSharedTabs.has(tabId)) {
-    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId), accepted: false });
+    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId).url,
+               room_url: acceptedSharedTabs.get(tabId).roomUrl, accepted: false });
     acceptedSharedTabs.delete(tabId);
   }
   toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
@@ -1444,9 +1467,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "get-status") {
     Promise.all([chrome.tabs.query({ active: true, currentWindow: true }), chrome.tabs.query({})]).then(([[tab], tabs]) => {
       sendResponse({
-        ...getStatus(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isShared(tab.url)),
+        ...getStatus(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isAcceptedTab(tab)),
         room: roomMe ? { me: roomMe, shared: [...sharedPages], pages: [...sharedPageDetails.values()],
-                         accepted: tabs.filter(isAcceptedTab).map(tab => pageKey(tab.url)) } : null,
+                         accepted: tabs.filter(isAcceptedTab).map(tab => acceptedSharedTabs.get(tab.id).roomUrl) } : null,
       });
     });
     return true;
@@ -1542,43 +1565,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "share-tab" || msg.type === "unshare-tab") {
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       if (!tab || !pageKey(tab.url)) return sendResponse({ ok: false, error: "Only http(s) pages can be shared" });
-      toBridge({ type: msg.type === "share-tab" ? "share" : "unshare", tab_id: tab.id, url: tab.url, title: tab.title });
       const key = pageKey(tab.url);
       if (msg.type === "share-tab") {
+        const roomUrl = newRoomPageUrl();
+        toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: roomUrl,
+                   share_link: msg.share_link === true });
         manuallyShared.set(tab.id, key);
         stoppedByHuman.delete(key);
-        setRoomAccess(tab, true);
+        setRoomAccess(tab, true, roomUrl);
       } else {
+        const entry = acceptedSharedTabs.get(tab.id);
+        if (entry && sharedPageDetails.get(entry.roomUrl)?.by === roomMe?.id) {
+          toBridge({ type: "unshare", tab_id: tab.id, url: entry.roomUrl });
+        }
         manuallyShared.delete(tab.id);
         stoppedByHuman.add(key);
-        if (followedUrl === key && followedTabId === tab.id) { followedUrl = null; followedTabId = null; }
+        if (followedUrl === key && followedTabId === tab.id) {
+          followedUrl = null; followedTabId = null; followedRoomUrl = null;
+        }
         setRoomAccess(tab, false);
       }
-      sendResponse({ ok: true, url: pageKey(tab.url) });
+      sendResponse({ ok: true });
     });
     return true;
   }
   if (msg.type === "accept-shared-page" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
     (async () => {
       const key = msg.url;
-      if (typeof key !== "string" || !sharedPages.has(key) || pageKey(key) !== key) {
+      const page = sharedPageDetails.get(key);
+      if (typeof key !== "string" || !page || !sharedPages.has(key)) {
         return { ok: false, error: "That page is no longer shared" };
       }
       let tab;
       if (msg.mode === "current") {
         [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) return { ok: false, error: "There is no current tab" };
-        tab = await chrome.tabs.update(tab.id, { url: key });
-      } else if (msg.mode === "new") {
-        tab = await chrome.tabs.create({ url: key, active: true });
+        if (siteOrigin(tab.url) !== page.origin) return { ok: false, error: `Open a page on ${page.origin} first` };
+      } else if (msg.mode === "new" && page.href) {
+        tab = await chrome.tabs.create({ url: page.href, active: true });
       } else {
-        return { ok: false, error: "Choose how to open the page" };
+        return { ok: false, error: "The sharer did not provide a full link; use a tab already on this site" };
       }
       let loaded = await chrome.tabs.get(tab.id);
       if (loaded.status !== "complete") await waitForTabLoad(tab.id, 15000);
       loaded = await chrome.tabs.get(tab.id);
-      if (pageKey(loaded.url) !== key) return { ok: false, error: "The page opened at a different address; it was not accepted for the room" };
-      setRoomAccess(loaded, true);
+      if (siteOrigin(loaded.url) !== page.origin) return { ok: false, error: "The tab is on a different site" };
+      setRoomAccess(loaded, true, key);
       await trackHuman(tab.id);
       toBridge({ type: "tab_ready", tab_id: tab.id, url: loaded.url });
       return { ok: true };

@@ -417,10 +417,10 @@ function updateSettings(info) {
     for (const page of info.room.pages || []) {
       if (!page?.url || accepted.has(page.url)) continue;
       const row = el("div", { className: "room-invite" });
-      row.append(el("strong", { textContent: page.title || hostOf(page.url) || "Shared page" }),
-                 el("small", { textContent: page.url }));
+      row.append(el("strong", { textContent: page.title || hostOf(page.origin) || "Shared site" }),
+                 el("small", { textContent: page.href || page.origin }));
       const actions = el("div", { className: "room-invite-actions" });
-      for (const [label, mode] of [["Open page", "new"], ["Use current tab", "current"]]) {
+      for (const [label, mode] of [...(page.href ? [["Open page", "new"]] : []), ["Use current tab", "current"]]) {
         const button = el("button", { type: "button", textContent: label });
         button.addEventListener("click", () => setting({ type: "accept-shared-page", url: page.url, mode }, 500));
         actions.append(button);
@@ -457,12 +457,14 @@ $("openSettings").addEventListener("click", () => toggleSettings($("settings").h
 $("closeSettings").addEventListener("click", () => toggleSettings(false));
 $("shareBtn").addEventListener("click", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url || !confirm(`Share this page address with everyone in the room?\n\n${tab.url}\n\nThe address may contain private information in its path or search terms.`)) return;
-  setting({ type: "share-tab" }, 500);
+  if (!tab?.url) return;
+  const shareLink = $("shareFullLink").checked;
+  if (shareLink && !confirm(`Share this full address with everyone in the room?\n\n${tab.url}\n\nIts path or search terms may contain private information.`)) return;
+  setting({ type: "share-tab", share_link: shareLink }, 500);
 });
 $("unshareBtn").addEventListener("click", () => setting({ type: "unshare-tab" }, 500));
 $("followMe").addEventListener("change", () => {
-  if ($("followMe").checked && !confirm("Follow mode shares each page address you open with everyone in the room, including its path. Continue?")) {
+  if ($("followMe").checked && !confirm("Follow mode shares each active site's name with the room. Page paths and search terms stay private. Continue?")) {
     $("followMe").checked = false;
     return;
   }

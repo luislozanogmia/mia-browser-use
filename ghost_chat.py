@@ -867,7 +867,7 @@ class ChatHub:
                 raise RuntimeError(str(value))
             return value
 
-        return AskBot(agent.id, claude_answer(BOT_MODEL, can_act=True, effort=BOT_EFFORT), call=call, label=agent.name, color=agent.color,
+        return AskBot(agent.id, claude_answer(BOT_MODEL, can_act=True, effort=BOT_EFFORT, room_only=True), call=call, label=agent.name, color=agent.color,
                       report=claude_report(BOT_MODEL, effort=BOT_EFFORT))
 
     def context(self, tab: dict, language: Any, tab_id: int | None = None, open_tabs: list[dict] | None = None) -> str:

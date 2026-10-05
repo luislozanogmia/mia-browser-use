@@ -1,8 +1,25 @@
 import unittest
 
 import json
+from unittest import mock
 
+import ask_bot
 from ask_bot import AskBot, build_prompt, image_block, split_answer, stream_result
+
+
+def test_room_answers_have_no_web_tools_and_solo_answers_keep_them():
+    requested = []
+
+    def fake_run(*args, **kwargs):
+        requested.append(kwargs.get("tools"))
+        return lambda *_: "Answer"
+
+    with mock.patch.object(ask_bot, "claude_run", side_effect=fake_run):
+        ask_bot.claude_answer("model", room_only=True)(ASK, {"content": "Private page"})
+        assert requested == [""]
+        requested.clear()
+        ask_bot.claude_answer("model")(ASK, {"content": "Public page"})
+        assert requested == [ask_bot.WEB_TOOLS, ask_bot.WEB_TOOLS]
 
 ASK = {
     "id": "q1", "url": "https://en.wikipedia.org/wiki/Dinosaur", "question": "whats this?",
@@ -26,7 +43,8 @@ class FakeBridge:
         if command == "room_ask_image":
             return {"image": "data:image/jpeg;base64,QUJD"}
         if command == "room_approved_tabs":
-            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology"}] if self.accepted else []}
+            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology",
+                              "room_url": ASK["url"]}] if self.accepted else []}
         return {}
 
 

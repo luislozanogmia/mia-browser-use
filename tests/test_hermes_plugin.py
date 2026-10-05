@@ -165,7 +165,8 @@ class RepositoryBoundaryTests(unittest.TestCase):
         )
         violations = []
         for path in ROOT.rglob("*"):
-            if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+            # Only the project's own files: not a virtualenv, a built installer or downloaded packages.
+            if not path.is_file() or {".git", "__pycache__", "build", "site-packages", "node_modules"} & set(path.parts):
                 continue
             if path.suffix not in {".py", ".js", ".json", ".md", ".html", ".sh", ".yaml"}:
                 continue

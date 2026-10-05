@@ -191,6 +191,28 @@ def test_planner_cannot_upgrade_persons_ask_mode_to_do():
         assert "ghost_click" not in [command for command, _ in browser.actions()]
     asyncio.run(main())
 
+def test_without_a_mode_mia_decides_and_a_do_task_still_needs_tab_control():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_click", "args": {"choice": 3}},
+            {"done": "Next page."},
+        ]], plan={"tasks": [{"title": "Next", "goal": "Go to the next page", "kind": "do"}]})
+        msg = send("go to the next page")
+        del msg["mode"]  # the panel has no Ask/Do switch
+        await hub.handle(msg)
+        task = next(iter(hub.tasks.values()))
+        for _ in range(100):
+            if task.status == "needs_you":
+                break
+            await asyncio.sleep(0.01)
+        assert task.kind == "do" and task.question.startswith("Let ")
+        assert "ghost_click" not in [command for command, _ in browser.actions()]
+        await hub.handle({"action": "approve", "task": task.id})
+        await settle(hub)
+        assert task.status == "done" and "ghost_click" in [command for command, _ in browser.actions()]
+    asyncio.run(main())
+
 def test_page_context_requires_approval_before_external_navigation():
     async def main():
         hub, browser, _, _ = make_hub([[
@@ -307,7 +329,9 @@ def test_rules():
     assert check_action("ghost_navigate", {"url": "file:///etc"}, {"ghost_navigate"}, elements)
     assert check_action("ghost_eval", {}, {"ghost_read"}, elements)
     plan = parse_plan('ok {"reply": "hi", "tasks": [{"title": "t", "goal": ""}, {"goal": "g", "url": "ftp://x"}]}')
-    assert plan == {"reply": "hi", "tasks": [{"title": "Task", "goal": "g", "url": "", "kind": "do", "tab": 0, "keep_open": False, "done_when": "", "needs": []}]}
+    assert plan == {"reply": "hi", "tasks": [{"title": "Task", "goal": "g", "url": "", "kind": "do", "tab": 0, "keep_open": False,
+                                              "done_when": "", "needs": [], "save_as": None}],
+                    "automation": None, "run_automation": ""}
 
 
 def test_panel_sees_claude_status_and_can_start_setup():

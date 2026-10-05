@@ -66,10 +66,12 @@ class ChatStore:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 chats.append({"id": path.stem, "title": str(data.get("title", ""))[:TITLE_CHARS],
-                              "ts": int(data.get("ts", 0))})
+                              "ts": int(data.get("ts", 0)), "_written": path.stat().st_mtime_ns})
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
-        return sorted(chats, key=lambda c: c["ts"], reverse=True)
+        # Two chats saved in the same millisecond: the file written last is the newer one.
+        chats.sort(key=lambda c: (c["ts"], c.pop("_written")), reverse=True)
+        return chats
 
     def _files(self) -> list[Path]:
         try:

@@ -22,9 +22,11 @@ import shutil
 import tempfile
 import time
 from contextlib import suppress
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+import automations
 import claude_setup
 import chat_store
 from ask_bot import NO_MODEL
@@ -61,6 +63,9 @@ RISKY = re.compile(
     r"sign ?up|register|join|transfer|withdraw|deposit|accept|decline|approve|reject|merge|deploy|install|"
     r"upload|save changes|place)\b", re.I)
 ELEMENT_LINE = re.compile(r"^\[(\d+)\] (.*)$", re.M)
+SCHEDULE_TICK = 20  # seconds between checks for scheduled Play Automations
+PLAY_SETTLE_MS = 800  # after a click or key, the page gets this long to react
+PLAY_RETRIES = (1, 2, 3)  # seconds to wait for a step's element while the page loads
 
 PLAN_PROMPT = (
     "You are Mia, a browser assistant. You go with the person from tab to tab and manage a team of bots, one "
@@ -112,7 +117,20 @@ PLAN_PROMPT = (
     "for example https://www.upwork.com/nx/search/jobs/?q=ai%20research. A question you can answer from the "
     "context (their selection, earlier answers, the chat): no tasks, answer it in reply. Finding things out, "
     "on this page or others: kind ask. Anything that changes something (sending, posting, applying, saving): "
-    "kind do."
+    "kind do.\n"
+    "Play Automations: fixed scripts that Mia Browser replays click by click with no AI, on demand or on a "
+    "schedule (AI Workflows are what your bots do here, deciding each step). When the person asks to make, save "
+    "or schedule an automation, script or routine, do the job once so every step is recorded: plan one task "
+    "of kind do with \"save_as\": {\"name\": \"2 to 5 words\", \"about\": \"one sentence on what it does\", "
+    "\"schedule\": {\"kind\": \"manual\"} or {\"kind\": \"daily\" or \"weekdays\", \"at\": \"HH:MM\" 24-hour}}. "
+    "Its goal: do exactly the steps the person described, in order, and nothing else. When they want to save "
+    "what a bot just did (\"save that as an automation\"), reply with no tasks and \"automation\": {\"name\", "
+    "\"about\", \"schedule\", \"steps\"}, copying the steps from the bots' recorded steps in the context and "
+    "keeping only the ones the job needs. Step forms: {\"do\": \"open\", \"url\"} (always first), "
+    "{\"do\": \"click\", \"css\", \"text\"}, {\"do\": \"type\", \"css\", \"text\", \"value\"}, {\"do\": \"key\", "
+    "\"key\"}, {\"do\": \"copy\", \"css\", \"text\", \"as\": \"name\"} (then use {{name}} in a later value), "
+    "{\"do\": \"wait\", \"ms\"}, {\"do\": \"scroll\", \"direction\"}. To run a saved one, reply with "
+    "\"run_automation\": \"its name\" and no tasks. The context lists the saved ones."
 )
 
 ANSWER_PROMPT = (
@@ -254,8 +272,11 @@ def parse_plan(raw: str) -> dict:
                       "keep_open": task.get("keep_open") is True,
                       "done_when": _text(task.get("done_when"), 400),
                       "needs": [n for n in needs if isinstance(n, int) and not isinstance(n, bool)
-                                and 0 <= n < len(tasks)]})
-    return {"reply": _text(data.get("reply"), 600), "tasks": tasks}
+                                and 0 <= n < len(tasks)],
+                      "save_as": task.get("save_as") if isinstance(task.get("save_as"), dict) else None})
+    return {"reply": _text(data.get("reply"), 600), "tasks": tasks,
+            "automation": data.get("automation") if isinstance(data.get("automation"), dict) else None,
+            "run_automation": _text(data.get("run_automation"), 60)}
 
 
 def page_block(tool: str, value: Any) -> str:
@@ -297,6 +318,32 @@ def check_action(tool: str, args: dict, allowed: set[str], elements: dict[int, s
     if tool in {"ghost_vacuum", "ghost_navigate"} and not re.match(r"^https?://", str(args.get("url", ""))):
         return "Only http and https URLs."
     return ""
+
+
+def element_label(line: str) -> str:
+    """An element line's visible name: "link: Home (/)" → "Home"."""
+    label = line.split(": ", 1)[-1] if ": " in line else line
+    if line.startswith("link: "):
+        label = re.sub(r" \([^()]*\)$", "", label)
+    return " ".join(label.split())
+
+
+def match_element(elements: dict[int, str], text: str) -> int | None:
+    """The element a Play Automation step means by its text: an exact name first, then a close one."""
+    want = " ".join(text.split()).casefold()
+    if not want:
+        return None
+    labels = [(n, element_label(line).casefold()) for n, line in sorted(elements.items())]
+    for test in (lambda l: l == want, lambda l: l.startswith(want), lambda l: want in l):
+        for n, label in labels:
+            if test(label):
+                return n
+    return None
+
+
+def page_words(content: str) -> str:
+    """Read text without the element numbers: what a copy step keeps."""
+    return "\n".join(re.sub(r"^\[\d+\] [a-z]+(?:\([^)]*\))?: ", "", line) for line in content.splitlines()).strip()
 
 
 class ClaudeSession:
@@ -410,6 +457,9 @@ class Task:
         self.control_approved = False  # owner granted this do task control of its tab
         self.control_url = ""  # exact address at the grant, enforced by the extension
         self.current_url = url
+        self.trace: list[dict] = []  # what it did, as Play Automation steps (automations.py)
+        self.save_as: dict | None = None  # saved as a Play Automation when it finishes
+        self.automation = ""  # the Play Automation this task runs
 
     @property
     def tab_id(self) -> int | None:
@@ -442,8 +492,11 @@ class ChatHub:
                  plan: Callable[[str, str], Awaitable[str]] | None = None,
                  me: Callable[[], str] = lambda: "", make_bot: Callable[[Agent], Any] | None = None,
                  retire: Callable[[str], Awaitable[None]] | None = None,
-                 store: chat_store.ChatStore | None = None):
+                 store: chat_store.ChatStore | None = None,
+                 scripts: automations.AutomationStore | None = None):
         self.store = store  # past conversations on disk; None keeps them in memory only
+        self.scripts = scripts or automations.AutomationStore()  # Play Automations
+        self.scheduler: asyncio.Task | None = None
         self.call, self.push, self.room, self.session = call, push, room, session
         self.retire = retire  # a dropped bot leaves the room too
         self.me = me  # the person's room id: agent ids must be unique in the room
@@ -474,7 +527,8 @@ class ChatHub:
                 "tasks": [t.view() for t in tasks], "agents": agents, "planning": self.planning > 0,
                 "models": [{"id": k, "name": v} for k, v in MODELS.items()],
                 "claude": {**self.claude, "busy": self.claude_busy},
-                "chat": self.chat_id, "chats": self.store.list() if self.store else []}
+                "chat": self.chat_id, "chats": self.store.list() if self.store else [],
+                "automations": [automations.view(a, self.playing(a["id"])) for a in self.scripts.list()]}
 
     async def publish(self):
         try:
@@ -539,8 +593,19 @@ class ChatHub:
             await self.publish()
 
     async def _handle(self, msg: dict) -> None:
+        self.start_scheduler()
         action = msg.get("action")
-        if action == "sync":
+        if action == "play":
+            item = self.scripts.get(msg.get("automation"))
+            if item:
+                await self.play(item)
+        elif action in {"automation_pause", "automation_resume"}:
+            self.scripts.update(msg.get("automation"), paused=action == "automation_pause")
+            await self.publish()
+        elif action == "automation_delete":
+            self.scripts.delete(msg.get("automation"))
+            await self.publish()
+        elif action == "sync":
             await self.forget_closed_tabs()
             await self.publish()
         elif action == "tab_closed":
@@ -617,7 +682,9 @@ class ChatHub:
         text = _text(msg.get("text"), 2000)
         if not text:
             return
-        requested_mode = "do" if msg.get("mode") == "do" else "ask"
+        # The panel sends no mode (Mia decides, and tab control and risky steps need the person's approval).
+        # An explicit "ask" still binds her: those tasks only read.
+        requested_mode = msg.get("mode") if msg.get("mode") in {"ask", "do"} else "auto"
         run = "queue" if msg.get("run") == "queue" else "parallel"
         model = msg.get("model") if msg.get("model") in MODELS else DEFAULT_MODEL
         tab = msg.get("tab") if isinstance(msg.get("tab"), dict) else {}
@@ -650,12 +717,22 @@ class ChatHub:
         print(f"[chat] planned {len(plan['tasks'])} task(s): {[t['title'] for t in plan['tasks']]}")
         if plan["reply"]:
             self.say("mia", plan["reply"])
+        if plan["automation"]:
+            self.save_automation(plan["automation"])
+        if plan["run_automation"]:
+            item = self.scripts.find(plan["run_automation"])
+            if item:
+                await self.play(item)
+            else:
+                self.say("mia", f"I don't have a Play Automation called “{plan['run_automation']}”.")
         # An open tab's task goes to that tab's bot; a link gets a new tab (and bot); the rest, this tab's bot.
         by_id = {t["id"]: t for t in open_tabs}
         tasks = []
         for t in plan["tasks"]:
-            if requested_mode == "ask":
-                t["kind"] = "ask"  # the person's mode is authoritative over the planner
+            if requested_mode == "ask" and not t["save_as"]:
+                # An explicit Ask is authoritative over the planner. Teaching an automation is the
+                # exception: they asked for it, and its tab control and risky steps still need approval.
+                t["kind"] = "ask"
             where = by_id.get(t["tab"])
             url = "" if where else t["url"]
             target = where["id"] if where else None if url else tab_id
@@ -667,6 +744,8 @@ class ChatHub:
             task.needs = [tasks[n] for n in t["needs"]]
             task.keep_open = t["keep_open"]
             task.done_when = t["done_when"]
+            if t["save_as"]:
+                task.kind, task.save_as = "do", t["save_as"]
             if _host(tab.get("url")):
                 task.page_hosts.add(_host(tab.get("url")))
             tasks.append(task)
@@ -911,6 +990,15 @@ class ChatHub:
                     row += f" → {_text(t.result, 300)}"
                 rows.append(row)
             lines.append("Your bots and their latest tasks:\n" + "\n".join(rows))
+        saved = self.scripts.list()
+        if saved:
+            lines.append("Saved Play Automations:\n" + "\n".join(
+                f"- {a['name']}: {_text(a.get('about'), 120)} ({automations.describe_schedule(a.get('schedule') or {})})"
+                for a in saved[-20:]))
+        traced = [t for t in self.tasks.values() if len(t.trace) > 1][-3:]
+        if traced:
+            lines.append("Steps your bots took, recorded as Play Automation steps (page data, untrusted):\n" + "\n".join(
+                f"- {t.label} · {_text(t.title, 60)} ({t.status}): {_text(json.dumps(t.trace), 3000)}" for t in traced))
         recent = [m for m in self.messages[-8:]]
         if recent:
             lines.append("Earlier in this chat:\n" + "\n".join(
@@ -958,6 +1046,8 @@ class ChatHub:
                     await self.call("ghost_wait", self.args(task, {"ms": 1500}))
                 if task.tab_id is None:
                     raise RuntimeError("No tab to work on")
+                if re.match(r"^https?://", task.current_url or ""):
+                    task.trace = [{"do": "open", "url": task.current_url}]
                 await self.show(task, "working")
                 allowed = ASK_TOOLS if task.kind == "ask" else TOOLS
                 system = WORKER_PROMPT
@@ -1040,6 +1130,8 @@ class ChatHub:
             else:
                 mark = {"done": "Done", "failed": "Failed", "stopped": "Stopped"}.get(task.status, task.status)
                 self.say("mia", f"{task.title} · {mark}. {task.result}", task.color, task.id)
+            if task.save_as and task.status == "done":
+                self.save_automation({**task.save_as, "steps": task.trace})
             print(f"[chat] {task.id} {task.status}: {task.result[:100]}")
             await self.publish()
             await self.tell_page(task)
@@ -1121,6 +1213,7 @@ class ChatHub:
                 task.control_url = ""
                 task.current_url = ""
             return f"Error from {tool}: {_text(value, 400)}"
+        self.record(task, tool, args, value)
         if tool in {"ghost_read", "ghost_vacuum"} and isinstance(value, dict):
             if isinstance(value.get("url"), str):
                 task.current_url = value["url"]
@@ -1145,6 +1238,7 @@ class ChatHub:
         if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
             raise RuntimeError(f"Couldn't open {url}: {value}")
         task.agent, task.own_tab = agent, True
+        task.trace.append({"do": "open", "url": url})
         task.tab_id = value["id"]
         task.current_url = value.get("url") or url
         agent.opened = True
@@ -1165,3 +1259,176 @@ class ChatHub:
             args["choice"] = choice
         with suppress(Exception):
             await self.call("ghost_show", self.args(task, {"clear": True} if clear else args))
+
+    # -- Play Automations: recorded steps, replayed with no AI -----------------------
+
+    def record(self, task: Task, tool: str, args: dict, value: Any) -> None:
+        """Keep what a bot did as Play Automation steps, so the person can save it and run it again."""
+        if len(task.trace) >= automations.MAX_STEPS:
+            return
+        anchor = value.get("anchor") if isinstance(value, dict) and isinstance(value.get("anchor"), dict) else {}
+        line = task.elements.get(args.get("choice"), "")
+        target = {k: v for k, v in (("css", _text(anchor.get("selector"), 300)),
+                                    ("text", _text(anchor.get("text") or element_label(line), 120))) if v}
+        if tool in {"ghost_navigate", "ghost_vacuum"}:
+            task.trace.append({"do": "open", "url": args.get("url", "")})
+        elif tool == "ghost_click" and target:
+            task.trace.append({"do": "click", **target})
+        elif tool == "ghost_fill" and target:
+            task.trace.append({"do": "type", **target, "value": str(args.get("value") or "")[:automations.VALUE_CHARS]})
+        elif tool == "ghost_key":
+            task.trace.append({"do": "key", "key": _text(args.get("key"), 30), **({"text": target["text"]} if "text" in target else {})})
+        elif tool == "ghost_scroll":
+            task.trace.append({"do": "scroll", "direction": args.get("direction") or "down"})
+
+    def save_automation(self, data: dict) -> dict | None:
+        try:
+            item = self.scripts.add(automations.clean(data))
+        except ValueError as exc:
+            self.say("mia", f"I couldn't save that as a Play Automation: {exc}.")
+            return None
+        n = len(item["steps"])
+        when = automations.describe_schedule(item["schedule"])
+        self.say("mia", f"Saved “{item['name']}” as a Play Automation: {n} step{'' if n == 1 else 's'}, "
+                        f"{when[0].lower() + when[1:]}. Press ▶ at the top to see it or run it.")
+        return item
+
+    def playing(self, automation_id: str) -> bool:
+        return any(t.automation == automation_id and t.status in {"waiting", "working", "needs_you"}
+                   for t in self.tasks.values())
+
+    async def play(self, item: dict) -> Task | None:
+        """Run a Play Automation in a tab of its own; the person's tabs stay as they are."""
+        if self.playing(item["id"]):
+            self.say("mia", f"“{item['name']}” is already running.")
+            await self.publish()
+            return None
+        first = item["steps"][0].get("url", "")
+        task = self.add(Task(next(self.counter), item["name"], item.get("about", ""), first, "play", "parallel", "",
+                             self.agent_for(None, first)))
+        task.automation, task.keep_open = item["id"], True
+        task.job = asyncio.create_task(self.run_play(task, item))
+        await self.publish()
+        return task
+
+    async def run_play(self, task: Task, item: dict) -> None:
+        steps, values, n = item["steps"], {}, 0
+        try:
+            async with self.slots:
+                task.status = "working"
+                for n, step in enumerate(steps, 1):
+                    task.note = _text(f"{n}/{len(steps)} · {automations.describe_step(step)}", 80)
+                    await self.publish()
+                    await self.play_step(task, step, values)
+            task.status, task.result = "done", f"All {len(steps)} steps ran."
+        except asyncio.CancelledError:
+            task.status, task.result = "stopped", f"Stopped at step {n}."
+        except Exception as exc:
+            what = automations.describe_step(steps[n - 1]) if n else "starting"
+            task.status, task.result = "failed", f"Step {n} ({_text(what, 80)}) didn't work: {_why(exc)}"
+        finally:
+            if task.approval and not task.approval.done():
+                task.approval.cancel()
+            task.question = ""
+            self.scripts.update(item["id"], last_run={"at": int(time.time() * 1000), "status": task.status,
+                                                       "note": _text(task.result, 200)})
+            if task.tab_id is not None:
+                await self.show(task, {"done": "done", "failed": "failed"}.get(task.status), clear=task.status == "stopped")
+            mark = {"done": "Done", "failed": "Failed", "stopped": "Stopped"}.get(task.status, task.status)
+            self.say("mia", f"▶ {item['name']} · {mark}. {task.result}", task.color, task.id)
+            print(f"[chat] play {item['id']} {task.status}: {task.result[:100]}")
+            await self.publish()
+
+    def play_args(self, task: Task, args: dict) -> dict:
+        # The person started this run, in a tab the run opened itself.
+        return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id, "human_ok": True, "expected_url": ""}
+
+    async def play_call(self, task: Task, tool: str, args: dict) -> Any:
+        ok, value = await self.call(tool, self.play_args(task, args))
+        if not ok:
+            raise RuntimeError(_text(value, 200))
+        return value
+
+    async def find_target(self, task: Task, step: dict, last: dict) -> tuple[dict, str]:
+        """Where a step acts: the element with its text on the page now, or else its recorded selector."""
+        if last.get("key") == (step.get("css"), step.get("text")):
+            # The element the step before used (a field it typed into no longer shows its name).
+            return last["target"], last["line"]
+        for delay in PLAY_RETRIES:
+            if step.get("text"):
+                ok, value = await self.call("ghost_read", self.play_args(task, {"max_chars": 8000}))
+                if ok and isinstance(value, dict):
+                    elements = {int(n): line for n, line in ELEMENT_LINE.findall(str(value.get("content") or ""))}
+                    n = match_element(elements, step["text"])
+                    if n is not None:
+                        return {"choice": n}, elements[n]
+            if step.get("css"):
+                ok, _ = await self.call("ghost_wait", self.play_args(task, {"selector": step["css"], "timeout": 2000}))
+                if ok:
+                    return {"selector": step["css"]}, f"element: {step.get('text', '')}"
+            await asyncio.sleep(delay)  # the page may still be loading
+        raise RuntimeError("couldn't find it on the page")
+
+    async def play_step(self, task: Task, step: dict, values: dict) -> None:
+        do = step["do"]
+        if do == "open":
+            if task.tab_id is None:
+                ok, value = await self.call("ghost_tab_open", {"url": step["url"], "actor_id": task.agent.id})
+                if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
+                    raise RuntimeError(f"couldn't open {step['url']}: {_text(value, 120)}")
+                task.tab_id = value["id"]
+                task.agent.opened, task.agent.host = True, _host(value.get("url") or step["url"])
+                self.name_agent(task.agent)
+                await self.show(task, "working")
+            else:
+                await self.play_call(task, "ghost_navigate", {"url": step["url"]})
+            await self.play_call(task, "ghost_wait", {"ms": 1500})
+            return
+        if do == "wait":
+            await self.play_call(task, "ghost_wait", {"selector": step["css"], "timeout": 10000} if step.get("css")
+                                 else {"ms": step["ms"]})
+            return
+        if do == "scroll":
+            await self.play_call(task, "ghost_scroll", {"direction": step["direction"]})
+            return
+        target, line = await self.find_target(task, step, values.get("", {})) if step.get("css") or step.get("text") else ({}, "")
+        values[""] = {"key": (step.get("css"), step.get("text")), "target": target, "line": line} if target else {}
+        if do == "copy":
+            if "choice" in target:
+                text = element_label(line)
+            else:
+                read = await self.play_call(task, "ghost_read", {"selector": step["css"], "max_chars": 4000})
+                text = page_words(str((read or {}).get("content") or "")) if isinstance(read, dict) else ""
+            values[step["as"]] = text[:automations.VALUE_CHARS]
+            return
+        tool = {"click": "ghost_click", "type": "ghost_fill", "key": "ghost_key"}[do]
+        args = {**target}
+        if do == "type":
+            if "input(password)" in line:
+                raise RuntimeError("Play Automations never type passwords")
+            args["value"] = automations.VAR.sub(lambda m: values.get(m[1], ""), step["value"])
+        if do == "key":
+            args["key"] = step["key"]
+        question = needs_approval(tool, {**args, "choice": 0}, {0: line} if line else {}, "")
+        if question and not await self.wait_for_approval(task, question, args.get("choice")):
+            raise RuntimeError("you rejected that step")
+        await self.play_call(task, tool, args)
+        if do in {"click", "key"}:
+            values[""] = {}  # the page may have changed
+            await self.play_call(task, "ghost_wait", {"ms": PLAY_SETTLE_MS})
+
+    def start_scheduler(self) -> None:
+        if self.scheduler is None or self.scheduler.done():
+            with suppress(RuntimeError):
+                self.scheduler = asyncio.get_running_loop().create_task(self.run_schedule())
+
+    async def run_schedule(self) -> None:
+        """Start scheduled Play Automations when their time comes (Chrome must be open)."""
+        while True:
+            try:
+                for item in self.scripts.due(datetime.now()):
+                    print(f"[chat] scheduled run of {item['id']}")
+                    await self.play(item)
+            except Exception as exc:
+                print(f"[chat] schedule check failed: {exc!r}")
+            await asyncio.sleep(SCHEDULE_TICK)

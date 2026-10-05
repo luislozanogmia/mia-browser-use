@@ -83,6 +83,7 @@ function render(next) {
   renderApprovals((state.tasks || []).filter(t => t.status === "needs_you"));
   renderClaude(state.claude);
   if (!$("history").hidden) renderHistory();
+  if (!$("plays").hidden) renderPlays();
   if (connected && status.textContent.startsWith("Not connected")) setStatus("");
 }
 
@@ -367,7 +368,7 @@ function renderHistory() {
 }
 
 function toggleHistory(open) {
-  if (open) toggleSettings(false);
+  if (open) { toggleSettings(false); togglePlays(false); }
   document.body.classList.toggle("in-history", open);
   $("history").hidden = !open;
   $("openHistory").setAttribute("aria-expanded", String(open));
@@ -377,10 +378,76 @@ $("openHistory").addEventListener("click", () => toggleHistory($("history").hidd
 $("closeHistory").addEventListener("click", () => toggleHistory(false));
 $("claudeBtn").addEventListener("click", () => { $("claudeBtn").disabled = true; chat("claude_setup").finally(() => { $("claudeBtn").disabled = false; }); });
 
+// -- Play Automations: scripts Mia Browser replays click by click, no AI ----------------------
+
+const openPlays = new Set();  // automations whose details are shown
+
+function lastRun(last) {
+  if (!last?.at) return "";
+  const word = { done: "Last run", failed: "Last run failed", stopped: "Last run stopped" }[last.status] || "Last run";
+  return `${word} ${when(last.at)}${last.status === "failed" && last.note ? `: ${last.note}` : ""}`;
+}
+
+function renderPlays() {
+  const plays = state?.automations || [];
+  if (!plays.length) {
+    $("playList").replaceChildren(el("p", { className: "empty", textContent: connected
+      ? "No Play Automations yet. Press + and tell Mia what to do, step by step. She does it once, then saves it."
+      : "Connect to Mia Browser to see your Play Automations." }));
+    return;
+  }
+  $("playList").replaceChildren(...plays.map(a => {
+    const open = openPlays.has(a.id);
+    const line = a.running ? "Running…" : (a.paused ? "Paused · " : "") + a.schedule;
+    const row = el("button", { className: "play-row", ariaExpanded: String(open) },
+      el("span", { className: "state" + (a.running ? " running" : a.paused ? " paused" : "") }),
+      el("span", { className: "what" }, el("b", { textContent: a.name }), el("small", { textContent: line })));
+    row.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
+    const item = el("div", { className: "play" + (open ? " open" : "") }, row);
+    if (!open) return item;
+    const run = el("button", { className: "run", textContent: a.running ? "Running…" : "▶ Play", disabled: a.running });
+    run.addEventListener("click", () => chat("play", { automation: a.id }));
+    const actions = el("div", { className: "play-actions" }, run);
+    if (a.scheduled) {
+      const pause = el("button", { textContent: a.paused ? "Resume" : "Pause" });
+      pause.addEventListener("click", () => chat(a.paused ? "automation_resume" : "automation_pause", { automation: a.id }));
+      actions.append(pause);
+    }
+    const del = el("button", { className: "del", textContent: "Delete" });
+    del.addEventListener("click", () => {
+      if (confirm(`Delete the Play Automation “${a.name}”?`)) { openPlays.delete(a.id); chat("automation_delete", { automation: a.id }); }
+    });
+    actions.append(del);
+    const last = lastRun(a.last_run);
+    item.append(el("div", { className: "play-detail" },
+      a.about ? el("p", { textContent: a.about }) : "",
+      el("ol", {}, ...a.steps.map(step => el("li", { textContent: step }))),
+      last ? el("p", { className: "last " + (a.last_run?.status || ""), textContent: last }) : "",
+      actions));
+    return item;
+  }));
+}
+
+function togglePlays(open) {
+  if (open) { toggleSettings(false); toggleHistory(false); }
+  document.body.classList.toggle("in-plays", open);
+  $("plays").hidden = !open;
+  $("openPlays").setAttribute("aria-expanded", String(open));
+  if (open) { renderPlays(); chat("sync"); }
+}
+$("openPlays").addEventListener("click", () => togglePlays($("plays").hidden));
+$("closePlays").addEventListener("click", () => togglePlays(false));
+$("newPlay").addEventListener("click", () => {
+  togglePlays(false);
+  input.value = "Make a Play Automation that ";
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+});
+
 // -- settings: what the toolbar popup used to hold --------------------------------------
 
 function toggleSettings(open) {
-  if (open) toggleHistory(false);
+  if (open) { toggleHistory(false); togglePlays(false); }
   document.body.classList.toggle("in-settings", open);
   $("settings").hidden = !open;
   $("openSettings").setAttribute("aria-expanded", String(open));
@@ -391,8 +458,8 @@ function toggleSettings(open) {
 function updateSettings(info) {
   const on = Boolean(info.connected);
   connected = on;
-  $("conn").classList.toggle("on", on);
-  $("conn").title = on ? "Connected to Mia Browser" : "Not connected";
+  $("openPlays").classList.toggle("off", !on);
+  $("openPlays").title = on ? "Play Automations" : "Play Automations · Mia Browser is not running";
   $("dot").classList.toggle("on", on);
   $("statusLabel").textContent = on ? "Connected" : "Disconnected";
   $("statusDetail").textContent = on ? `Bridge on port ${info.port}`

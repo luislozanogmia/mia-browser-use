@@ -10,7 +10,9 @@
   <header class="top">
     <button class="room-pill" id="room" hidden></button>
     <span class="faces" id="faces"></span>
-    <span class="conn" id="conn" title="Not connected"></span>
+    <button class="icon play-btn" id="openPlays" title="Play Automations" aria-label="Play Automations" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>
+    </button>
     <button class="icon" id="openHistory" title="Past chats" aria-label="Past chats" aria-expanded="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
     </button>
@@ -66,6 +68,19 @@
     <p class="version" id="version"></p>
   </section>
 
+  <section class="plays" id="plays" hidden>
+    <div class="plays-head">
+      <p class="section-label first">Play Automations</p>
+      <button class="icon" id="newPlay" title="New Play Automation" aria-label="New Play Automation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+    <p class="hint">Scripts Mia Browser runs click by click, with no AI: open, click, type, copy and paste.
+      Mia's bots in the chat are AI Workflows.</p>
+    <div id="playList"></div>
+    <button class="wide primary" id="closePlays">Back to the chat</button>
+  </section>
+
   <section class="history" id="history" hidden>
     <p class="section-label first">Past chats</p>
     <div id="chatList"></div>
@@ -76,7 +91,7 @@
     <section class="hello" id="hello">
       <span class="mote mia-mark big" aria-hidden="true"></span>
       <h1>Hi, I'm Mia</h1>
-      <p><b>Ask</b> about the page you're on, or switch to <b>Do</b> and tell me what to do on it.
+      <p><b>Ask</b> about the page you're on, or tell me what to <b>do</b> on it.
         I'll stop and ask before anything that sends, posts or buys.</p>
     </section>
   </main>

@@ -39,6 +39,7 @@ echo "→ Ghost $VERSION"
 for f in "$REPO"/*.py "$REPO/mia-browser-use"; do cp "$f" "$STAGE/app/"; done
 cp "$REPO/ghost-cli" "$STAGE/app/"  # old name, kept for existing scripts
 rsync -a --exclude '.DS_Store' "$REPO/extension" "$STAGE/app/"
+rsync -a --exclude ".DS_Store" "$REPO/mia_skills" "$STAGE/app/"
 "$PY" -m compileall -q "$STAGE/app" "$STAGE/python/lib" 2>/dev/null || true
 
 # The helper Chrome starts (see native_host.py). Chrome gives it a bare environment.

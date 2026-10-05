@@ -381,6 +381,7 @@ $("claudeBtn").addEventListener("click", () => { $("claudeBtn").disabled = true;
 // -- Play Automations: scripts Mia Browser replays click by click, no AI ----------------------
 
 const openPlays = new Set();  // automations whose details are shown
+const playInputs = new Map();  // what the person typed in an automation's boxes, kept across redraws
 
 function lastRun(last) {
   if (!last?.at) return "";
@@ -389,6 +390,8 @@ function lastRun(last) {
 }
 
 function renderPlays() {
+  // Don't redraw under the person's cursor while they type in a box.
+  if (document.activeElement?.closest?.("#playList textarea")) return;
   const plays = state?.automations || [];
   if (!plays.length) {
     $("playList").replaceChildren(el("p", { className: "empty", textContent: connected
@@ -405,13 +408,30 @@ function renderPlays() {
     row.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
     const item = el("div", { className: "play" + (open ? " open" : "") }, row);
     if (!open) return item;
-    const run = el("button", { className: "run", textContent: a.running ? "Running…" : "▶ Play", disabled: a.running });
-    run.addEventListener("click", () => chat("play", { automation: a.id }));
+    const typed = playInputs.get(a.id) || {};
+    const boxes = (a.inputs || []).map(input => {
+      const box = el("textarea", { rows: 3, value: typed[input.name] ?? "", placeholder: "Use {{first_name}} or other copied values" });
+      box.addEventListener("input", () => playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [input.name]: box.value }));
+      return el("label", { className: "play-input" }, el("span", { textContent: input.label }), box);
+    });
+    const run = el("button", { className: "run", textContent: a.running ? "■ Stop" : "▶ Play" });
+    run.addEventListener("click", () => {
+      if (a.running) { chat("stop", { task: a.task }); return; }
+      const values = playInputs.get(a.id) || {};
+      const empty = (a.inputs || []).find(input => !String(values[input.name] || "").trim());
+      if (empty) { setStatus(`Fill in “${empty.label}” first.`, true); return; }
+      chat("play", { automation: a.id, inputs: values });
+    });
     const actions = el("div", { className: "play-actions" }, run);
     if (a.scheduled) {
       const pause = el("button", { textContent: a.paused ? "Resume" : "Pause" });
       pause.addEventListener("click", () => chat(a.paused ? "automation_resume" : "automation_pause", { automation: a.id }));
       actions.append(pause);
+    }
+    if (a.each && a.done) {
+      const reset = el("button", { textContent: "Start over", title: `Forget the ${a.done} links already done` });
+      reset.addEventListener("click", () => chat("automation_reset", { automation: a.id }));
+      actions.append(reset);
     }
     const del = el("button", { className: "del", textContent: "Delete" });
     del.addEventListener("click", () => {
@@ -422,6 +442,9 @@ function renderPlays() {
     item.append(el("div", { className: "play-detail" },
       a.about ? el("p", { textContent: a.about }) : "",
       el("ol", {}, ...a.steps.map(step => el("li", { textContent: step }))),
+      a.each ? el("p", { textContent: `${a.each}, until the list is used up or you press Stop.`
+        + (a.done ? ` ${a.done} done so far; the next run carries on.` : "") }) : "",
+      ...boxes,
       last ? el("p", { className: "last " + (a.last_run?.status || ""), textContent: last }) : "",
       actions));
     return item;

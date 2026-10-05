@@ -279,3 +279,196 @@ def test_a_bad_script_from_mia_is_explained_not_saved():
         assert not hub.scripts.list()
         assert "first step must open a page" in hub.messages[-1]["text"]
     asyncio.run(main())
+
+
+# -- going through a list, with the person's own text --------------------------------
+
+RESULTS = ("People\n[0] link: Ana Silva (https://www.linkedin.com/in/ana-silva?mini=1)\n"
+           "[1] link: Bo Chen (/in/bo-chen/)\n[2] link: Jobs (https://www.linkedin.com/jobs/)\n"
+           "[3] link: Ana Silva (https://www.linkedin.com/in/ana-silva?mini=2)\n[4] button: Next")
+PROFILE = "Profile\n[0] h1: {name}\n[1] button: Message\n[2] div: Write a message…\n[3] button: Send"
+LOOP = {"name": "1st connection message", "schedule": {"kind": "manual"},
+        "inputs": [{"name": "template", "label": "Message"}],
+        "each": {"links": "linkedin.com/in/", "next": "Next"},
+        "steps": [
+            {"do": "open", "url": "https://www.linkedin.com/search/results/people/?network=F"},
+            {"do": "open", "url": "{{link}}"},
+            {"do": "copy", "text": "Ana Silva", "css": "h1", "as": "first_name", "words": 1},
+            {"do": "click", "text": "Message"},
+            {"do": "type", "text": "Write a message", "value": "{{template}}"},
+        ]}
+
+
+class ListBrowser(PlayBrowser):
+    """A results page with two people on page 1, one more on page 2, then no more."""
+
+    def __init__(self):
+        super().__init__()
+        self.url, self.page = "", 1
+
+    async def __call__(self, command, args):
+        self.calls.append((command, args))
+        if command in {"ghost_tab_open", "ghost_navigate"}:
+            self.url = args["url"]
+            if "search" in self.url and command == "ghost_navigate":
+                pass  # back to the list: same page as before
+            return True, {"id": 91, "url": args["url"]}
+        if command == "ghost_click" and args.get("choice") == 4 and "search" in self.url:
+            self.page += 1
+            return True, {"clicked": True}
+        if command == "ghost_read" and args.get("selector") == "h1":
+            return True, {"content": f"[0] h1: {self.name()}"}
+        if command == "ghost_read":
+            if "search" in self.url:
+                content = RESULTS if self.page == 1 else (
+                    "People\n[0] link: Cy Diaz (https://www.linkedin.com/in/cy-diaz)\n[4] button: Next" if self.page == 2
+                    else "People\nNo more results")
+                return True, {"url": self.url, "content": content}
+            return True, {"url": self.url, "content": PROFILE.format(name=self.name())}
+        return True, {"ok": True}
+
+    def name(self):
+        return {"ana-silva": "Ana Silva", "bo-chen": "Bo Chen", "cy-diaz": "Cy Diaz"}[self.url.rstrip("/").rsplit("/", 1)[-1]]
+
+
+def test_a_repeating_automation_goes_through_every_link_page_after_page(tmp_path):
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser, tmp_path)
+        item = hub.scripts.add(clean(LOOP))
+        task = await hub.play(item, {"template": "Hi {{first_name}}, how is research going?", "other": "ignored"})
+        await finish(task)
+        assert task.status == "done", task.result
+        typed = [a["value"] for c, a in browser.calls if c == "ghost_fill"]
+        assert typed == ["Hi Ana, how is research going?", "Hi Bo, how is research going?", "Hi Cy, how is research going?"]
+        opened = [a["url"] for c, a in browser.calls if c == "ghost_navigate" and "/in/" in a["url"]]
+        assert opened == ["https://www.linkedin.com/in/ana-silva", "https://www.linkedin.com/in/bo-chen",
+                          "https://www.linkedin.com/in/cy-diaz"]
+        assert task.result == "Done for 3 links."
+        # The next run carries on where this one ended: nothing left, until Start over.
+        assert hub.states[-1]["automations"][0]["done"] == 3
+        browser.page = 1
+        task = await hub.play(item, {"template": "Hi"})
+        await finish(task)
+        assert task.result == "Done for 0 links."
+        await hub.handle({"action": "automation_reset", "automation": item["id"]})
+        assert hub.scripts.get(item["id"])["done"] == []
+    asyncio.run(main())
+
+
+def test_a_repeating_automation_skips_a_link_that_fails_and_stops_after_three_in_a_row():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        script = {**LOOP, "each": {"links": "linkedin.com/in/"}, "steps": LOOP["steps"][:2] + [{"do": "click", "text": "Follow"}]}
+        task = await hub.play(hub.scripts.add(clean(script)), {"template": "x"})
+        await finish(task)
+        assert task.status == "done" and task.result.startswith("Done for 0 links. Skipped 2:")
+
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        many = "People\n" + "\n".join(f"[{i}] link: P{i} (https://www.linkedin.com/in/ana-silva-{i})" for i in range(5))
+        browser.name = lambda: "Ana Silva"
+        orig = browser.__call__
+
+        async def call(command, args):
+            if command == "ghost_read" and "search" in browser.url and not args.get("selector"):
+                browser.calls.append((command, args))
+                return True, {"url": browser.url, "content": many}
+            return await orig(command, args)
+        hub.call = call
+        task = await hub.play(hub.scripts.add(clean(script)), {"template": "x"})
+        await finish(task)
+        assert task.status == "failed" and "3 links in a row didn't work" in task.result
+    asyncio.run(main())
+
+
+def test_play_asks_for_its_inputs_in_the_panel():
+    async def main():
+        hub = play_hub(ListBrowser())
+        item = hub.scripts.add(clean(LOOP))
+        await hub.handle({"action": "sync"})
+        shown = hub.states[-1]["automations"][0]
+        assert shown["inputs"] == [{"name": "template", "label": "Message"}]
+        assert shown["each"] == "Repeats for each link with “linkedin.com/in/” in its address, page after page (“Next”)"
+        assert shown["steps"][1:3] == ["Open the link", "Copy the first word of “Ana Silva” as {{first_name}}"]
+        assert shown["task"] == ""
+    asyncio.run(main())
+
+
+def test_clean_checks_loops_and_inputs():
+    with pytest.raises(ValueError, match="first step must open a page"):
+        clean({**LOOP, "steps": LOOP["steps"][1:]})
+    with pytest.raises(ValueError, match="without copying it first or asking for it"):
+        clean({**LOOP, "inputs": []})
+    assert "{{link}}" not in str(clean({**LOOP, "each": None})["steps"])  # without a loop, {{link}} can't be opened
+
+
+def test_a_recording_becomes_a_script_with_values_and_a_loop():
+    async def main():
+        hub, browser, states, sessions = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_fill", "args": {"choice": 0, "value": "Hi Ana"}},
+            {"done": "Typed the message."},
+        ]], plan={"reply": "Recording it.", "tasks": [{
+            "title": "Record", "goal": "Do it once", "kind": "do", "save_as": {"name": "1st connection message"}}]})
+        asked = []
+
+        async def compose(model, prompt):
+            asked.append(prompt)
+            return json.dumps({**LOOP, "name": "Something else"})
+        hub.compose = compose
+        await hub.handle(send("make a play automation that messages my connections"))
+        task = next(iter(hub.tasks.values()))
+        for _ in range(100):
+            if task.status == "needs_you":
+                await hub.handle({"action": "approve", "task": task.id})
+            if task.job.done():
+                break
+            await asyncio.sleep(0.01)
+        saved = hub.scripts.find("1st connection message")
+        assert saved and saved["each"]["links"] == "linkedin.com/in/" and saved["inputs"][0]["name"] == "template"
+        assert '"value": "Hi Ana"' in asked[0] and "messages my connections" in asked[0]
+    asyncio.run(main())
+
+
+def test_a_recording_mia_cannot_turn_into_a_script_is_saved_as_recorded():
+    async def main():
+        hub, *_ = make_hub([[{"tool": "ghost_read", "args": {}}, {"done": "Read it."}]], plan={
+            "reply": "Recording.", "tasks": [{"title": "R", "goal": "g", "kind": "do", "save_as": {"name": "Plain"}}]})
+
+        async def compose(model, prompt):
+            return "not json"
+        hub.compose = compose
+        await hub.handle(send("make an automation"))
+        task = next(iter(hub.tasks.values()))
+        await task.job
+        assert hub.scripts.find("Plain")["steps"] == [{"do": "open", "url": "https://mail.example/"}]
+    asyncio.run(main())
+
+
+def test_an_empty_plan_gets_a_reply_instead_of_silence():
+    async def main():
+        hub, *_ = make_hub([], plan={"reply": "", "tasks": []})
+        await hub.handle(send("make a play automation"))
+        assert hub.messages[-1]["who"] == "mia" and "send it again" in hub.messages[-1]["text"]
+    asyncio.run(main())
+
+
+def test_an_automation_mia_writes_herself_is_made_reusable_too():
+    async def main():
+        hub, *_ = make_hub([], plan={"reply": "Saved.", "tasks": [], "automation": {
+            "name": "1st connection message",
+            "steps": [{"do": "open", "url": "https://www.linkedin.com/in/alejandro-lozano/"},
+                      {"do": "type", "text": "Write a message", "value": "Hola Alejandro"}]}})
+        asked = []
+
+        async def compose(model, prompt):
+            asked.append(prompt)
+            return json.dumps(LOOP)
+        hub.compose = compose
+        await hub.handle(send("save that as an automation for all my connections"))
+        saved = hub.scripts.find("1st connection message")
+        assert "Hola Alejandro" in asked[0] and "all my connections" in asked[0]
+        assert saved["each"]["links"] == "linkedin.com/in/" and saved["inputs"][0]["name"] == "template"
+    asyncio.run(main())

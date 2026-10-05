@@ -50,7 +50,7 @@ class Browser:
     def actions(self):
         return [(c, a) for c, a in self.calls if c != "ghost_show"]
 
-def make_hub(scripts, plan=None):
+def make_hub(scripts, plan=None, others=False):
     states, sessions, made = [], [], []
 
     def session(model, system, effort):
@@ -69,6 +69,8 @@ def make_hub(scripts, plan=None):
     browser = Browser()
     hub = ChatHub(browser, push, session=session, plan=planner)
     hub.made = made
+    if others:  # someone else is in the room: multiplayer
+        hub.room = lambda: {"name": "r", "others": 1}
     hub.claude_status = lambda fresh=False: {"installed": True, "signed_in": True}
     return hub, browser, states, sessions
 
@@ -114,7 +116,7 @@ def test_do_waits_for_approval_before_a_risky_click():
             {"tool": "ghost_read", "args": {}},
             {"note": "sending", "tool": "ghost_click", "args": {"choice": 1}},
             {"done": "Sent."},
-        ]], plan={"reply": "On it.", "tasks": [{"title": "Send it", "goal": "Send the draft", "url": ""}]})
+        ]], plan={"reply": "On it.", "tasks": [{"title": "Send it", "goal": "Send the draft", "url": ""}]}, others=True)
         await hub.handle(send("send my draft", mode="do"))
         for _ in range(50):
             task = next(iter(hub.tasks.values()))
@@ -153,7 +155,7 @@ def test_rejected_action_never_runs():
             {"tool": "ghost_read", "args": {}},
             {"tool": "ghost_click", "args": {"choice": 3}, "confirm": "Go to the next page?"},
             {"done": "Left it."},
-        ]], plan={"tasks": [{"title": "Page", "goal": "next page", "url": ""}]})
+        ]], plan={"tasks": [{"title": "Page", "goal": "next page", "url": ""}]}, others=True)
         await hub.handle(send("next", mode="do"))
         task = next(iter(hub.tasks.values()))
         for _ in range(50):
@@ -787,4 +789,22 @@ def test_a_bot_that_fails_or_is_stopped_still_reports_what_it_found():
         await hub.handle({"action": "stop", "task": task.id})
         await settle(hub)
         assert task.status == "stopped" and "https://x.example/cy" in task.result
+    asyncio.run(main())
+
+
+def test_alone_a_bot_takes_the_tab_without_asking():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_read", "args": {}},
+            {"tool": "ghost_click", "args": {"choice": 0}},
+            {"done": "Clicked."},
+        ]], plan={"reply": "On it.", "tasks": [{"title": "Click", "goal": "Click it", "kind": "do"}]})
+        request = send("click the first thing")
+        request.pop("mode")  # the panel sends no mode: Mia decides
+        await hub.handle(request)
+        task = next(iter(hub.tasks.values()))
+        await asyncio.wait_for(task.job, 5)
+        assert task.status == "done" and task.question == ""
+        clicks = [a for c, a in browser.calls if c == "ghost_click"]
+        assert clicks and clicks[0]["human_ok"] is True
     asyncio.run(main())

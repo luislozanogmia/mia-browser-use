@@ -13,6 +13,15 @@ A script is a list of steps:
   {"do": "copy", "css"/"text": ..., "as": "total"}          keeps the text for {{total}}
   {"do": "wait", "ms": 2000} or {"do": "wait", "css": "..."}
   {"do": "scroll", "direction": "down" | "up" | "top" | "bottom"}
+A copy step can keep only the first words: {"do": "copy", ..., "as": "first_name", "words": 1}.
+
+Two optional parts make a script repeat and ask before it runs:
+  "each": {"links": "linkedin.com/in/", "next": "Next"}   the first step opens a list page; the
+      rest run once per link on it whose address contains "links" ({{link}}), page after page
+      (the "next" button), until the list is used up or the person presses Stop. Links already
+      done are remembered, so the next run carries on.
+  "inputs": [{"name": "template", "label": "Message"}]     text boxes in the panel, filled before
+      Play, used as {{template}}; an input may itself use copied values like {{first_name}}.
 
 Kept in ~/.ghost/automations.json, readable only by the person.
 """
@@ -36,6 +45,9 @@ VALUE_CHARS = 2000
 CATCH_UP = timedelta(minutes=30)  # a scheduled run missed by less than this still runs
 ACTIONS = {"open", "click", "type", "key", "copy", "wait", "scroll"}
 TARGETED = {"click", "type", "copy"}
+MAX_INPUTS = 5
+MAX_DONE = 5000  # links remembered as done, per automation
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,30}")
 VAR = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]{0,30})\s*\}\}")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 AUTOMATION_ID = re.compile(r"^auto-[a-z0-9]{1,20}$")
@@ -45,8 +57,8 @@ def _text(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-def clean_step(step: Any) -> dict | None:
-    """One step as stored, or None when it's malformed."""
+def clean_step(step: Any, loop: bool = False) -> dict | None:
+    """One step as stored, or None when it's malformed. In a loop, open may go to {{link}}."""
     if not isinstance(step, dict) or step.get("do") not in ACTIONS:
         return None
     do = step["do"]
@@ -58,6 +70,8 @@ def clean_step(step: Any) -> dict | None:
         out["text"] = text
     if do == "open":
         url = _text(step.get("url"), 1000)
+        if loop and VAR.fullmatch(url) and VAR.fullmatch(url)[1] == "link":
+            return {"do": do, "url": "{{link}}"}
         return {"do": do, "url": url} if re.match(r"^https?://", url) else None
     if do in TARGETED and not (css or text):
         return None
@@ -70,9 +84,12 @@ def clean_step(step: Any) -> dict | None:
         out["key"] = key
     if do == "copy":
         name = _text(step.get("as"), 31)
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,30}", name):
+        if not NAME.fullmatch(name):
             return None
         out["as"] = name
+        words = step.get("words")
+        if isinstance(words, int) and not isinstance(words, bool) and 1 <= words <= 20:
+            out["words"] = words
     if do == "wait":
         if not css:
             out.pop("text", None)
@@ -99,18 +116,33 @@ def clean(data: Any) -> dict:
     name = _text(data.get("name"), NAME_CHARS)
     if not name:
         raise ValueError("it needs a name")
+    each = data.get("each") if isinstance(data.get("each"), dict) else None
+    links = _text(each.get("links"), 200) if each else ""
     raw = data.get("steps") if isinstance(data.get("steps"), list) else []
-    steps = [s for s in (clean_step(s) for s in raw[:MAX_STEPS]) if s]
+    steps = [s for s in (clean_step(s, loop=bool(links)) for s in raw[:MAX_STEPS]) if s]
     if not steps:
         raise ValueError("it has no steps it can run")
-    if steps[0]["do"] != "open":
+    if steps[0]["do"] != "open" or steps[0]["url"] == "{{link}}":
         raise ValueError("the first step must open a page")
-    copied = {s["as"] for s in steps if s["do"] == "copy"}
-    missing = sorted({m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])} - copied)
+    if each and not links:
+        raise ValueError("a repeating automation needs the text its links contain")
+    if links and len(steps) < 2:
+        raise ValueError("a repeating automation needs steps to run for each link")
+    inputs = []
+    for item in (data.get("inputs") if isinstance(data.get("inputs"), list) else [])[:MAX_INPUTS]:
+        key = _text(item.get("name"), 31) if isinstance(item, dict) else ""
+        if NAME.fullmatch(key) and key not in {i["name"] for i in inputs} and key != "link":
+            inputs.append({"name": key, "label": _text(item.get("label"), 60) or key.replace("_", " ").capitalize()})
+    known = {s["as"] for s in steps if s["do"] == "copy"} | {i["name"] for i in inputs} | ({"link"} if links else set())
+    used = {m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])}
+    missing = sorted(used - known)
     if missing:
-        raise ValueError(f"it uses {{{{{missing[0]}}}}} without copying it first")
-    return {"name": name, "about": _text(data.get("about"), ABOUT_CHARS), "steps": steps,
-            "schedule": clean_schedule(data.get("schedule"))}
+        raise ValueError(f"it uses {{{{{missing[0]}}}}} without copying it first or asking for it")
+    out = {"name": name, "about": _text(data.get("about"), ABOUT_CHARS), "steps": steps,
+           "schedule": clean_schedule(data.get("schedule")), "inputs": inputs}
+    if links:
+        out["each"] = {"links": links, "next": _text(each.get("next"), 60)}
+    return out
 
 
 def describe_step(step: dict) -> str:
@@ -118,7 +150,7 @@ def describe_step(step: dict) -> str:
     target = f"“{step['text']}”" if step.get("text") else "the element at " + step.get("css", "")
     do = step["do"]
     if do == "open":
-        return f"Open {step['url']}"
+        return "Open the link" if step["url"] == "{{link}}" else f"Open {step['url']}"
     if do == "click":
         return f"Click {target}"
     if do == "type":
@@ -126,7 +158,8 @@ def describe_step(step: dict) -> str:
     if do == "key":
         return f"Press {step['key']}" + (f" in {target}" if step.get("css") or step.get("text") else "")
     if do == "copy":
-        return f"Copy {target} as {{{{{step['as']}}}}}"
+        part = f"the first word{'s' if step['words'] > 1 else ''} of " if step.get("words") else ""
+        return f"Copy {part}{target} as {{{{{step['as']}}}}}"
     if do == "wait":
         return f"Wait for {target}" if step.get("css") else f"Wait {step['ms'] / 1000:g} s"
     return f"Scroll {step['direction']}"
@@ -200,7 +233,7 @@ class AutomationStore:
         """Save a cleaned automation; one with the same name is replaced (Mia improving it)."""
         now = now or datetime.now()
         old = self.find(data["name"])
-        item = {"id": old["id"] if old else f"auto-{secrets.token_hex(4)}", **data,
+        item = {"id": old["id"] if old else f"auto-{secrets.token_hex(4)}", **data, "done": [],
                 "paused": False, "created": int(time.time() * 1000),
                 "last_slot": past_slot(data["schedule"], now), "last_run": old.get("last_run") if old else None}
         self.items = [a for a in self.items if a is not old][-(MAX_AUTOMATIONS - 1):] + [item]
@@ -213,6 +246,13 @@ class AutomationStore:
             item.update(fields)
             self._save()
         return item
+
+    def mark_done(self, automation_id: Any, link: str) -> None:
+        """A link the automation finished: the next run skips it."""
+        item = self.get(automation_id)
+        if item is not None:
+            item["done"] = (item.get("done") or [])[-(MAX_DONE - 1):] + [link]
+            self._save()
 
     def delete(self, automation_id: Any) -> bool:
         before = len(self.items)
@@ -241,4 +281,9 @@ def view(item: dict, running: bool = False) -> dict:
             "schedule": describe_schedule(item.get("schedule") or {}),
             "scheduled": (item.get("schedule") or {}).get("kind") in {"daily", "weekdays"},
             "paused": bool(item.get("paused")), "running": running,
-            "steps": [describe_step(s) for s in item["steps"]], "last_run": last}
+            "steps": [describe_step(s) for s in item["steps"]], "last_run": last,
+            "inputs": [dict(i) for i in item.get("inputs") or []],
+            "each": (f"Repeats for each link with “{item['each']['links']}” in its address"
+                     + (f", page after page (“{item['each']['next']}”)" if item["each"].get("next") else "")
+                     if item.get("each") else ""),
+            "done": len(item.get("done") or [])}

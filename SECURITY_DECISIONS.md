@@ -23,9 +23,11 @@ users, or check that it reports a Claude Code version.
 ## The side panel has no Ask/Do switch: Mia decides
 
 The panel sends a request without a mode, and Mia plans whether to read or to
-act. What protects the person is approvals, not a mode: a bot asks before it
-takes control of a tab, and before anything that sends, posts, buys, deletes
-or opens a site with data from the page. An explicit `"mode": "ask"` still
+act. What protects the person is approvals, not a mode: a bot asks before
+anything that sends, posts, buys, deletes or opens a site with data from the
+page. When other people are in the room (multiplayer), a bot also asks before
+it takes control of a tab. Alone (solo), it doesn't: the person asked for the
+job themselves, and asking again only got in the way. An explicit `"mode": "ask"` still
 limits a request to reading.
 
 A review made a missing mode mean Ask. Bots could no longer click or type, so

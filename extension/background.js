@@ -1014,7 +1014,7 @@ async function wait(args) {
   while (Date.now() - start < timeout) {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: (sel) => !!document.querySelector(sel),
+      func: (sel) => !!(globalThis.__ghostPage?.deepQuery ? globalThis.__ghostPage.deepQuery(sel) : document.querySelector(sel)),
       args: [selector],
     });
     if (results?.[0]?.result) return { found: true, selector, elapsed: Date.now() - start };
@@ -1324,7 +1324,7 @@ chrome.tabs.onRemoved.addListener(tabId => toBridge({ type: "chat", chat: { acti
 
 let chatState = null;
 const CHAT_ACTIONS = new Set(["claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat",
-  "play", "automation_pause", "automation_resume", "automation_delete"]);
+  "play", "automation_pause", "automation_resume", "automation_delete", "automation_reset"]);
 
 // What the person is looking at: the tab, the text they selected and the links inside it.
 async function chatTab() {
@@ -1360,6 +1360,12 @@ async function chatFromPanel(msg) {
                  agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
                  chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined,
                  automation: typeof msg.automation === "string" ? msg.automation.slice(0, 32) : undefined };
+  if (msg.action === "play" && msg.inputs && typeof msg.inputs === "object") {
+    // What the person typed in a Play Automation's boxes: a few short strings, nothing else.
+    chat.inputs = Object.fromEntries(Object.entries(msg.inputs).slice(0, 5)
+      .filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]{0,30}$/.test(k) && typeof v === "string")
+      .map(([k, v]) => [k, v.slice(0, 2000)]));
+  }
   if (msg.action === "send") {
     Object.assign(chat, {
       // The panel has no Ask/Do switch: Mia decides. A mode sent explicitly still binds her.

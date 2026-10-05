@@ -131,7 +131,8 @@ letters, digits and `_`, starting with a letter. Up to 5 inputs.
 
 - The first step opens the list page.
 - Every link on that page whose address contains `links` is an item. The address is kept without its query,
-  `#` part or trailing `/`, so the same person counts once.
+  `#` part or trailing `/`, so the same person counts once. When the query is what tells items apart
+  (`news.ycombinator.com/item?id=123`), put the `?` in `links` (`item?id=`): then the query is kept.
 - The other steps run once per item, in order, starting with `{"do": "open", "url": "{{link}}"}`.
 - `next` is the text of the list's next-page button. After the page's items, Mia Browser goes back to the
   list, clicks it, and carries on, until there's no next page or no new items. Leave it empty for a

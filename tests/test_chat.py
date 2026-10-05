@@ -346,11 +346,19 @@ def test_panel_sees_claude_status_and_can_start_setup():
         with mock.patch("claude_setup.status", side_effect=[{"installed": True, "signed_in": False},
                                                               {"installed": True, "signed_in": False},
                                                               {"installed": True, "signed_in": True}]), \
-             mock.patch("claude_setup.login", side_effect=lambda: calls.append("login")), \
+             mock.patch("claude_setup.login", side_effect=lambda: calls.append("login") or True), \
              mock.patch("ghost_chat.asyncio.sleep", new=mock.AsyncMock()):
             await hub.setup_claude()
         assert calls == ["login"]
         assert "signing_in" in [s["claude"]["busy"] for s in states]
+        assert states[-1]["claude"]["busy"] == ""
+        assert not any("didn't open" in m["text"] for m in hub.messages)
+
+        # A sign-in that fails to start says so in the chat, and the button stays to try again.
+        with mock.patch("claude_setup.status", return_value={"installed": True, "signed_in": False}), \
+             mock.patch("claude_setup.login", return_value=False):
+            await hub.setup_claude()
+        assert "Press “Sign in to Claude” to try again" in hub.messages[-1]["text"]
         assert states[-1]["claude"]["busy"] == ""
     asyncio.run(run())
 

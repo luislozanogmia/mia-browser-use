@@ -1,10 +1,9 @@
 # Mia Browser Use: third-party service disclosure
 
-Mia Browser Use can use Claude Code with your own Anthropic account. When Mia installs
-Claude Code on a supported Mac, it downloads Anthropic's unmodified version
-`2.1.281` and checks the downloaded binary against a pinned SHA-256 value before
-running it. Mia uses the verified version it manages for its agents; an
-existing Claude Code installation elsewhere is left alone.
+Mia Browser Use uses Claude Code with your own Anthropic account. If Claude Code
+is already installed, Mia uses that installation. If it is missing, the installer
+runs Anthropic's official install script, which puts Claude Code in your home
+folder.
 
 Claude Code and the Claude service are provided by Anthropic and are subject to
 Anthropic's applicable [terms](https://www.anthropic.com/legal) and policies.

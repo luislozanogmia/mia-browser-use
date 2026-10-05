@@ -9,10 +9,15 @@ as_user() { launchctl asuser "$USER_ID" sudo -u "$USER_NAME" "$@"; }
 # Programs from an older install would keep running old code; Chrome starts the new ones.
 pkill -f "$GHOST/app/ghost_cli.py" 2>/dev/null || true
 
-# Mia answers with the person's Claude account. Install the pinned, SHA-verified
-# Anthropic binary as that person; sign-in happens later in Mia's panel.
-as_user "$GHOST/python/bin/python3" "$GHOST/app/claude_setup.py" install \
-  >> "/private/tmp/ghost-install-claude.log" 2>&1 || true
+# Mia answers with the person's Claude account: install Claude Code for them if it's
+# missing (Anthropic's official installer, into their home folder). An existing
+# install is used as it is. Signing in happens later from Mia's panel, with one
+# button. A failure here never fails the install.
+USER_HOME="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"
+if [ ! -x "$USER_HOME/.local/bin/claude" ] && ! as_user /bin/bash -lc 'command -v claude' >/dev/null 2>&1; then
+  as_user /bin/bash -c 'set -o pipefail; /usr/bin/curl -fsSL https://claude.ai/install.sh | /bin/bash' \
+    >> "/private/tmp/ghost-install-claude.log" 2>&1 || true
+fi
 
 # The store version installs itself; otherwise show how to load the extension.
 if ls "/Library/Application Support/Google/Chrome/External Extensions/"*.json >/dev/null 2>&1; then

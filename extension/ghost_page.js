@@ -96,6 +96,45 @@
     return `[${n}] ${tag}: ${label}`;
   }
 
+  function parentOf(node) {
+    if (node.parentElement) return node.parentElement;
+    const root = node.getRootNode();
+    return root instanceof ShadowRoot ? root.host : null;
+  }
+
+  /** The element on top at a point, inside shadow roots too. */
+  function topAt(x, y) {
+    let el = document.elementFromPoint(x, y);
+    for (let depth = 0; el && depth < 10; depth++) {
+      const inner = shadowOf(el)?.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  }
+
+  /** What floats on top of the page (a chat window, a dialog, a pop-up), found by looking at what's on
+   * top across the screen. Sites often add these at the end of the page, past where a read stops. */
+  function layersOnTop() {
+    const found = new Set();
+    const w = innerWidth, h = innerHeight;
+    for (let i = 1; i < 12; i++) {
+      for (let j = 1; j < 8; j++) {
+        let layer = null;
+        for (let node = topAt((w * i) / 12, (h * j) / 8); node && node !== document.body; node = parentOf(node)) {
+          if (node.nodeType === Node.ELEMENT_NODE &&
+              (getComputedStyle(node).position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role")))) {
+            layer = node;  // keep climbing: the outermost one is the whole window
+          }
+        }
+        // Bars (a site's top menu, a minimized chat) are short; windows and dialogs are not.
+        if (layer && layer.getBoundingClientRect().height >= 120) found.add(layer);
+      }
+    }
+    // A layer inside another is read with it.
+    return [...found].filter(a => ![...found].some(b => b !== a && b.contains(a)));
+  }
+
   /** Walk the page, number interactive elements for this actor, return text. */
   function enumerate(actor, maxChars, selector) {
     checkActor(actor);
@@ -104,9 +143,10 @@
     const items = [];
     const elements = [];
     let chars = 0;
+    let skip = new Set();  // layers already read
 
     function walk(node) {
-      if (chars >= maxChars) return;
+      if (chars >= maxChars || skip.has(node)) return;
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent.trim();
         if (text) { items.push(text); chars += text.length; }
@@ -133,7 +173,19 @@
       }
     }
 
-    walk(rootEl);
+    if (selector) {
+      walk(rootEl);
+    } else {
+      // What's on top first: it's what the person is looking at, and it may be past where the read stops.
+      const layers = layersOnTop();
+      if (layers.length) {
+        items.push("On top of the page (a window or dialog):");
+        for (const layer of layers) walk(layer);
+        items.push("The page under it:");
+        skip = new Set(layers);
+      }
+      walk(rootEl);
+    }
     const snapshot = `${actor}-${++snapshotCounter}`;
     lists.set(actor, { snapshot, elements });
     return { text: items.join("\n"), count: elements.filter(Boolean).length, snapshot };

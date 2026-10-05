@@ -519,3 +519,46 @@ def test_a_bot_uses_a_saved_automation_for_one_item_in_its_own_tab(tmp_path):
         assert "use_automation" in hub.made[0]["system"]
         assert "inputs: template; repeats for each link with “linkedin.com/in/”" in hub.made[0]["session"].prompts[0]
     asyncio.run(main())
+
+
+def test_a_loop_whose_items_differ_by_their_query_keeps_it():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        page = ("HN\n[0] link: 12 comments (item?id=1)\n[1] link: 3 comments (item?id=2#c)\n"
+                "[2] link: 12 comments (https://news.ycombinator.com/item?id=1)")
+
+        async def call(command, args):
+            if command == "ghost_read" and not args.get("selector"):
+                return True, {"url": "https://news.ycombinator.com/", "content": page}
+            return await browser(command, args)
+        hub.call = call
+        task = await hub.play(hub.scripts.add(clean({"name": "HN", "each": {"links": "item?id="}, "steps": [
+            {"do": "open", "url": "https://news.ycombinator.com/"}, {"do": "open", "url": "{{link}}"}]})))
+        await finish(task)
+        assert task.result == "Done for 2 links."
+        opened = [a["url"] for c, a in browser.calls if c == "ghost_navigate" and "item" in a["url"]]
+        assert opened == ["https://news.ycombinator.com/item?id=1", "https://news.ycombinator.com/item?id=2"]
+    asyncio.run(main())
+
+
+def test_a_bot_that_only_looks_things_up_may_use_an_automation_that_does_not_type(tmp_path):
+    async def main():
+        browser = ListBrowser()
+        hub = builder_hub(browser, [[
+            {"tool": "use_automation", "args": {"name": "Names", "link": "https://www.linkedin.com/in/ana-silva"}},
+            {"tool": "use_automation", "args": {"name": "1st connection message", "link": "https://www.linkedin.com/in/ana-silva"}},
+            {"done": "Ana."},
+        ]], {"reply": "", "tasks": [{"title": "Name", "kind": "ask", "goal": "Get Ana's first name with Names."}]}, tmp_path)
+        hub.scripts.add(clean(LOOP))
+        hub.scripts.add(clean({"name": "Names", "each": {"links": "linkedin.com/in/"}, "steps": [
+            LOOP["steps"][0], LOOP["steps"][1], {"do": "copy", "css": "h1", "as": "first_name", "words": 1},
+            {"do": "click", "text": "Send"}]}))
+        await hub.handle(send("what's Ana's first name?"))
+        task = next(iter(hub.tasks.values()))
+        await run_task(hub, task)
+        prompts = hub.made[0]["session"].prompts
+        assert 'Copied: {"first_name": "Ana"}' in prompts[1] and "skipped in this test" in prompts[1]
+        assert "types into the page, and your task only looks things up" in prompts[2]
+        assert not [c for c, a in browser.calls if c in {"ghost_click", "ghost_fill"}]
+    asyncio.run(main())

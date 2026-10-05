@@ -58,7 +58,7 @@ TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_click", "ghost_f
             "ghost_scroll", "ghost_wait", "use_automation"}
 BUILD_TOOLS = TOOLS | {"test_automation"}
 MAX_BUILD_FIXES = 3  # times a builder is sent back when what it wants to save can't be saved or wasn't tested
-ASK_TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_scroll", "ghost_wait"}
+ASK_TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_scroll", "ghost_wait", "use_automation"}
 ORDINARY_URL_PARAMS = {"q", "query", "search", "term", "page", "start", "offset", "sort", "filter", "view", "tab", "gid", "lang", "language"}
 # Words on a control that mean pressing it changes something for someone else.
 RISKY = re.compile(
@@ -176,7 +176,8 @@ WORKER_PROMPT = (
     '  use_automation {"name": "a saved Play Automation", "inputs": {"its input": "text"}, "link": optional https '
     'link of one item}: runs it in a tab of your own, step by step as saved, and tells you how each step went and '
     'what it copied. For one that repeats over a list, link runs it for that one item. When one fits your task '
-    '(or your goal names one), use it instead of doing those steps yourself: it is quicker and surer.\n'
+    '(or your goal names one), use it instead of doing those steps yourself: it is quicker and surer. A task '
+    'that only looks things up can use one that doesn\'t type; anything that would send is skipped.\n'
     "\nRules:\n"
     "- A read lists what floats on top of the page first (a chat window, a dialog, a pop-up), under \"On top of "
     "the page\", then the page under it. After a click that opens a window, read again and look there first. "
@@ -384,7 +385,9 @@ BUILD_PROMPT = (
     '4. Finish with {"done": "one or two sentences for Mia: what it does and what the person fills before '
     'Play", "automation": {the script that passed its last test}}. It is saved under that name, replacing one '
     "with the same name. Only a script that passed test_automation as it is can be saved.\n"
-    "If the site needs signing in or shows a bot check, stop with fail and say so."
+    "Build it on the site the person named, never a copy or another site that's easier to script. When the "
+    "script can't do something the job needs, finish with what works and say what's missing in done, or "
+    "fail and say why. If the site needs signing in or shows a bot check, stop with fail and say so."
 )
 
 
@@ -410,8 +413,9 @@ def match_element(elements: dict[int, str], text: str) -> int | None:
 
 
 def page_words(content: str) -> str:
-    """Read text without the element numbers: what a copy step keeps."""
-    return "\n".join(re.sub(r"^\[\d+\] [a-z0-9]+(?:\([^)]*\))?: ", "", line) for line in content.splitlines()).strip()
+    """Read text without the element numbers or a link's address: what a copy step keeps."""
+    return "\n".join(element_label(line[1]) if line else raw
+                     for raw, line in ((raw, re.match(r"^\[\d+\] (.*)$", raw)) for raw in content.splitlines())).strip()
 
 
 class ClaudeSession:
@@ -1527,9 +1531,9 @@ class ChatHub:
             print(f"[chat] play {item['id']} {task.status}: {task.result[:100]}")
             await self.publish()
 
-    async def page_links(self, task: Task) -> tuple[list[str], str]:
-        """Every web link on the page, without query, fragment or trailing slash (so one person is one
-        link), in order, and the page's address."""
+    async def page_links(self, task: Task, keep_query: bool = False) -> tuple[list[str], str]:
+        """Every web link on the page, without fragment, trailing slash or (unless keep_query) query, so
+        one person is one link, in order, and the page's address."""
         ok, value = await self.call("ghost_read", self.play_args(task, {"max_chars": 30000}))
         if not ok or not isinstance(value, dict):
             raise RuntimeError(f"couldn't read the list: {_text(value, 120)}")
@@ -1541,16 +1545,19 @@ class ChatHub:
                 continue
             parts = urlsplit(urljoin(page, href[1]))
             link = f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/') or '/'}"
+            if keep_query and parts.query:
+                link += f"?{parts.query}"
             if parts.scheme in {"http", "https"} and link not in links:
                 links.append(link)
         return links, page
 
     async def list_links(self, task: Task, pattern: str, skip: set[str]) -> tuple[list[str], str]:
-        """The list page's links whose address contains the pattern, in order."""
-        links, page = await self.page_links(task)
+        """The list page's links whose address contains the pattern, in order. A pattern with a "?"
+        (item?id=) means the query tells the items apart, so it's kept."""
+        links, page = await self.page_links(task, "?" in pattern)
         return [link for link in links if pattern.casefold() in link.casefold() and link not in skip], page
 
-    async def play_each(self, task: Task, item: dict, values: dict) -> tuple[int, list[str]]:
+    async def play_each(self, task: Task, item: dict, values: dict, dry: bool = False) -> tuple[int, list[str]]:
         """Run the steps after the first once per link on the list page, page after page."""
         each, body = item["each"], item["steps"][1:]
         done = set(self.scripts.get(item["id"]).get("done") or []) if self.scripts.get(item["id"]) else set()
@@ -1563,7 +1570,7 @@ class ChatHub:
                     for k, step in enumerate(body, 1):
                         task.note = _text(f"{finished + 1} · {link.rsplit('/', 2)[-2] or link} · {automations.describe_step(step)}", 80)
                         await self.publish()
-                        await self.play_step(task, step, values)
+                        await self.play_step(task, step, values, dry)
                 except RuntimeError as exc:
                     if "rejected" in str(exc):
                         raise
@@ -1751,11 +1758,12 @@ class ChatHub:
             body = steps[1:]
             if item.get("each"):
                 each = item["each"]
-                links, _ = await self.page_links(task)
+                links, _ = await self.page_links(task, "?" in each["links"])
                 items = [link for link in links if each["links"].casefold() in link.casefold()]
                 if not items:
                     raise StepFailed(1, steps[0], f"no link on the list page has “{each['links']}” in its address. "
                                      "Links there: " + ", ".join(links[:25]))
+                task.approved_urls.update(items)  # found on the page, not chosen by the model
                 lines.append(f"   The list page has {len(items)} item{'' if len(items) == 1 else 's'} with "
                              f"“{each['links']}”: " + ", ".join(items[:5]) + (" …" if len(items) > 5 else ""))
                 if each.get("next"):
@@ -1792,6 +1800,11 @@ class ChatHub:
         if not item:
             names = ", ".join(f"“{a['name']}”" for a in self.scripts.list()) or "none"
             return f"There's no saved Play Automation called “{_text(args.get('name'), 60)}”. Saved ones: {names}."
+        # A bot that only looks things up may run one that doesn't type, with nothing that asks the person.
+        dry = task.kind == "ask"
+        if dry and any(st["do"] in {"type", "key"} for st in item["steps"]):
+            return (f"“{item['name']}” types into the page, and your task only looks things up. Do it by "
+                    "reading pages, or finish and say Mia should give it to a bot that can act.")
         given = args.get("inputs") if isinstance(args.get("inputs"), dict) else {}
         values = {i["name"]: _text(given.get(i["name"]), automations.VALUE_CHARS) for i in item.get("inputs") or []}
         link = str(args.get("link") or "")
@@ -1805,17 +1818,17 @@ class ChatHub:
             if item.get("each") and re.match(r"^https?://", link):
                 values["link"] = link
                 await self.into_own_tab(task, link)
-                await self.run_steps(task, steps[1:], values, 2, lines)
+                await self.run_steps(task, steps[1:], values, 2, lines, dry)
                 summary = f"Ran “{item['name']}” for {link}."
             else:
                 await self.into_own_tab(task, automations.VAR.sub(lambda m: values.get(m[1], ""), steps[0]["url"]))
                 if item.get("each"):
-                    await self.run_steps(task, steps[:1], values, 1, lines)
-                    done, skipped = await self.play_each(task, item, values)
+                    await self.run_steps(task, steps[:1], values, 1, lines, dry)
+                    done, skipped = await self.play_each(task, item, values, dry)
                     summary = (f"Ran “{item['name']}” for {done} link{'' if done == 1 else 's'}."
                                + (f" Skipped {len(skipped)}: " + "; ".join(skipped[:5]) if skipped else ""))
                 else:
-                    await self.run_steps(task, steps, values, 1, lines)
+                    await self.run_steps(task, steps, values, 1, lines, dry)
                     summary = f"Ran “{item['name']}”: all {len(steps)} steps worked."
         except StepFailed as exc:
             lines.append(f"{exc.n}. {automations.describe_step(exc.step)}: didn't work, {exc.why}")

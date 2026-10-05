@@ -747,6 +747,28 @@ async function sendKey(args) {
     );
   }
 
+  // A key aimed at one element is pressed there, without moving focus; Enter submits its form.
+  if (args.key && targeted) {
+    return runInPage(
+      tabId,
+      (actor, choice, selector, key, announce) => {
+        try {
+          const el = globalThis.__ghostPage.resolve(actor, choice, selector);
+          const opts = { key, code: key.length === 1 ? undefined : key, bubbles: true, cancelable: true };
+          const go = el.dispatchEvent(new KeyboardEvent("keydown", opts));
+          el.dispatchEvent(new KeyboardEvent("keyup", opts));
+          // A page that handles Enter itself cancels the keydown; otherwise the form is sent.
+          if (go && key === "Enter" && el.form) el.form.requestSubmit();
+          if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+          return { value: { key, pressed: true, anchor: globalThis.__ghostPage.anchorOf(el) } };
+        } catch (err) {
+          return { error: err.message };
+        }
+      },
+      [actorOf(args), args.choice ?? null, args.selector || null, args.key, isActorCall(args)],
+    );
+  }
+
   // Untargeted keys go to whatever has focus, which may be the human's cursor.
   await refuseIfHumanViewing(args, tabId, "HUMAN_ACTIVE", "target an element with choice or selector instead of the focused one");
 
@@ -1301,7 +1323,8 @@ chrome.tabs.onRemoved.addListener(tabId => toBridge({ type: "chat", chat: { acti
 // ---------------------------------------------------------------------------
 
 let chatState = null;
-const CHAT_ACTIONS = new Set(["claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat"]);
+const CHAT_ACTIONS = new Set(["claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat",
+  "play", "automation_pause", "automation_resume", "automation_delete"]);
 
 // What the person is looking at: the tab, the text they selected and the links inside it.
 async function chatTab() {
@@ -1335,10 +1358,12 @@ async function chatFromPanel(msg) {
   if (!(connected && ws && ws.readyState === WebSocket.OPEN)) return { ok: false, error: "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome" };
   const chat = { action: msg.action, task: typeof msg.task === "string" ? msg.task.slice(0, 32) : undefined,
                  agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
-                 chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined };
+                 chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined,
+                 automation: typeof msg.automation === "string" ? msg.automation.slice(0, 32) : undefined };
   if (msg.action === "send") {
     Object.assign(chat, {
-      text: String(msg.text || "").slice(0, 2000), mode: msg.mode === "do" ? "do" : "ask",
+      // The panel has no Ask/Do switch: Mia decides. A mode sent explicitly still binds her.
+      text: String(msg.text || "").slice(0, 2000), mode: ["ask", "do"].includes(msg.mode) ? msg.mode : "auto",
       run: msg.run === "queue" ? "queue" : "parallel", model: String(msg.model || "").slice(0, 60),
       tab: await chatTab(), language, owner_color: roomMe?.color || "",
     });

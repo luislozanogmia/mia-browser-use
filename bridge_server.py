@@ -55,6 +55,7 @@ from bridge_auth import _request_message
 from ghost_tool_defs import TOOL_NAMES
 from ghost_room import clean_language
 from reel_story import write_story
+from automations import AutomationStore
 from chat_store import ChatStore
 from ghost_chat import ChatHub
 
@@ -115,7 +116,8 @@ class BridgeServer:
         # Mia's side panel: its conversation, and the workers acting on tabs.
         self.chat = ChatHub(self._chat_call, self._chat_push, self._chat_room,
                             me=lambda: self.room.me["id"] if self.room else "", retire=self._chat_retire,
-                            store=ChatStore())
+                            store=ChatStore(),
+                            scripts=AutomationStore(Path.home() / ".ghost" / "automations.json"))
 
     # ------------------------------------------------------------------
     # WebSocket handler — Chrome extension connects here
@@ -910,6 +912,7 @@ class BridgeServer:
         print(f"[bridge] HTTP API on http://127.0.0.1:{self.port + 1}/call")
         print(f"[bridge] Pair the extension with the token stored at {token_path()}")
         print(f"[bridge] Waiting for Chrome extension...")
+        self.chat.start_scheduler()  # scheduled Play Automations
         if self.room:
             self.room.on_message = self.on_room_message
             self.room.start()

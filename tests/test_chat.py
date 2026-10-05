@@ -135,6 +135,18 @@ def test_do_waits_for_approval_before_a_risky_click():
         assert task.status == "done" and hub.messages[-1]["text"] == "Mia: Sent."
     asyncio.run(main())
 
+def test_planner_cannot_upgrade_persons_ask_mode_to_do():
+    async def main():
+        hub, browser, _, _ = make_hub([[
+            {"tool": "ghost_click", "args": {"choice": 3}},
+            {"done": "I did not click."},
+        ]], plan={"tasks": [{"title": "Inspect", "goal": "Inspect the page", "kind": "do"}]})
+        await hub.handle(send("what is here?", mode="ask"))
+        await settle(hub)
+        assert next(iter(hub.tasks.values())).kind == "ask"
+        assert "ghost_click" not in [command for command, _ in browser.actions()]
+    asyncio.run(main())
+
 def test_rejected_action_never_runs():
     async def main():
         hub, browser, _, sessions = make_hub([[
@@ -203,7 +215,9 @@ def test_rules():
     assert check_action("ghost_navigate", {"url": "file:///etc"}, {"ghost_navigate"}, elements)
     assert check_action("ghost_eval", {}, {"ghost_read"}, elements)
     plan = parse_plan('ok {"reply": "hi", "tasks": [{"title": "t", "goal": ""}, {"goal": "g", "url": "ftp://x"}]}')
-    assert plan == {"reply": "hi", "tasks": [{"title": "Task", "goal": "g", "url": "", "kind": "do", "tab": 0, "keep_open": False, "done_when": "", "needs": []}]}
+    assert plan == {"reply": "hi", "tasks": [{"title": "Task", "goal": "g", "url": "", "kind": "do", "tab": 0, "keep_open": False,
+                                              "done_when": "", "needs": [], "save_as": None}],
+                    "automation": None, "run_automation": ""}
 
 
 def test_panel_sees_claude_status_and_can_start_setup():

@@ -1,3 +1,4 @@
+importScripts("reel_store.js");
 /**
  * Ghost Bridge — Background Service Worker
  *
@@ -59,12 +60,40 @@ function setBadge(text, color) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket connection to ghost-cli daemon
+// WebSocket connection to mia-browser-use daemon
 // ---------------------------------------------------------------------------
 
-function connect() {
-  if (!token) {
+const NATIVE_HOST = "com.ghost.bridge";
+let pairing = null;
+let bridgeJustStarted = false;
+
+// Ask the local Ghost install for the token (see native_host.py). It also
+// starts the bridge when it isn't running. Chrome only lets this extension
+// reach that program, and the token never enters a page.
+function pairAutomatically() {
+  pairing ??= new Promise(resolve => {
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "pair" }, reply => {
+        const ok = !chrome.runtime.lastError && reply?.ok && typeof reply.token === "string" && reply.token.length >= 32;
+        bridgeJustStarted = Boolean(ok && reply.bridge === "started");
+        if (ok && reply.token !== token) {
+          token = reply.token;
+          if (Number.isInteger(reply.port)) port = reply.port;
+          chrome.storage.local.set({ port, token });
+        }
+        resolve(Boolean(ok));
+      });
+    } catch {
+      resolve(false);
+    }
+  }).finally(() => { pairing = null; });
+  return pairing;
+}
+
+async function connect() {
+  if (!token && !(await pairAutomatically())) {
     setBadge("PAIR", "#f59e0b");
+    scheduleReconnect(); // try again once Ghost is installed
     return;
   }
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
@@ -101,6 +130,8 @@ function connect() {
       );
       if (!constantTimeEqual(msg.server_proof, expected)) {
         socket.close(4003, "untrusted bridge server");
+        // The bridge may have a new token; take it from the local install.
+        pairAutomatically();
         return;
       }
       authState.serverNonce = serverNonce;
@@ -124,23 +155,37 @@ function connect() {
       return;
     }
     if (!connected) return;
+    if (msg.type === "shared_pages") {
+      await setSharedPages(msg.pages, msg.me);
+      followActiveTab();
+      return;
+    }
     if (!msg.id || !msg.command) return;
 
+    const args = msg.args || {};
     try {
-      const result = await handleCommand(msg.command, msg.args || {});
-      socket.send(JSON.stringify({ id: msg.id, result }));
+      const result = await handleCommand(msg.command, args);
+      socket.send(JSON.stringify({ id: msg.id, result, meta: await tabMeta(args.tab_id ?? result?.tab_id ?? result?.id) }));
     } catch (err) {
       socket.send(JSON.stringify({ id: msg.id, error: err.message || String(err) }));
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = async () => {
     if (ws !== socket) return;
     ws = null;
+    const wasConnected = connected;
     connected = false;
     setBadge(token ? "OFF" : "PAIR", token ? "#ef4444" : "#f59e0b");
     console.log("[ghost-bridge] disconnected");
-    if (!intentionallyDisconnected && token) scheduleReconnect();
+    if (intentionallyDisconnected) return;
+    // No bridge answered: have the local install start it, then retry right away.
+    if (!wasConnected && await pairAutomatically() && bridgeJustStarted) {
+      reconnectDelay = RECONNECT_DELAY;
+      connect();
+      return;
+    }
+    scheduleReconnect();
   };
 
   socket.onerror = () => {
@@ -163,7 +208,7 @@ function disconnect({ forgetToken = false } = {}) {
 }
 
 function scheduleReconnect() {
-  if (intentionallyDisconnected || !token) return;
+  if (intentionallyDisconnected) return;
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -173,10 +218,10 @@ function scheduleReconnect() {
 }
 
 // ---------------------------------------------------------------------------
-// Command router — maps ghost-cli tool names to Chrome APIs
+// Command router — maps mia-browser-use tool names to Chrome APIs
 // ---------------------------------------------------------------------------
 
-async function handleCommand(command, args) {
+async function routeCommand(command, args) {
   switch (command) {
     case "ping":
       return { pong: true, ts: Date.now() };
@@ -227,8 +272,105 @@ async function handleCommand(command, args) {
     case "ghost_wait":
       return wait(args);
 
+    case "ghost_show":
+      return showPresence(args);
+
+    case "ghost_suggest":
+      return suggestHere(args);
+
+    // Internal: the bridge draws suggestions that arrive from the room.
+    case "ghost_suggestion":
+      return drawSuggestion(args);
+
+    // Internal: a bot's report for this browser's reel.
+    case "ghost_reel_add":
+      return reelAddReport(args);
+
+    // Internal: the words for the reel's PDF, written by the bridge's model.
+    case "ghost_reel_story":
+      chrome.runtime.sendMessage({ type: "reel-story-done", id: args.id, story: args.story, error: args.error }).catch(() => {});
+      return { ok: true };
+
+    // Internal: the bridge's chat (messages, tasks, approvals) for Mia's side panel.
+    case "ghost_chat_state":
+      chatState = args;
+      chrome.runtime.sendMessage({ type: "chat-state", state: args }).catch(() => {});
+      return { ok: true };
+
     default:
       throw new Error(`Unknown command: ${command}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Multiplayer rules — several bots and humans share this browser
+// ---------------------------------------------------------------------------
+
+const DEFAULT_ACTOR = "_local";
+const ACTOR_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+// Commands an actor may send without naming a tab.
+const TABLESS_COMMANDS = new Set(["ping", "ghost_tab_list", "ghost_tab_open", "ghost_status"]);
+
+function isActorCall(args) {
+  return typeof args.actor_id === "string" && args.actor_id !== "";
+}
+
+function actorOf(args) {
+  return isActorCall(args) ? args.actor_id : DEFAULT_ACTOR;
+}
+
+function typedError(code, message) {
+  return new Error(`${code}: ${message}`);
+}
+
+// A human is looking at a tab when it is the selected tab of the focused window.
+async function humanIsViewing(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.active) return false;
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  return Boolean(win && win.focused);
+}
+
+async function refuseIfHumanViewing(args, tabId, code, what) {
+  if (isActorCall(args) && !args.human_ok && await humanIsViewing(tabId)) {
+    throw typedError(code, `A human is viewing tab ${tabId}; ${what}`);
+  }
+}
+
+// Chrome reports tab lifecycle problems as plain messages; give callers typed errors.
+function lifecycleError(err, tabId) {
+  const message = err && err.message ? err.message : String(err);
+  if (/^[A-Z_]+: /.test(message)) return err;
+  if (/No tab with id/i.test(message)) return typedError("TAB_NOT_FOUND", `Tab ${tabId ?? ""} does not exist or was closed`);
+  if (/tab was closed|Tabs cannot be edited/i.test(message)) return typedError("TAB_CLOSED", message);
+  if (/Frame with ID \d+ (was removed|is showing error page)|document was replaced/i.test(message)) {
+    return typedError("TAB_NAVIGATED", "The page changed during the call; read it again");
+  }
+  return err;
+}
+
+async function handleCommand(command, args) {
+  if (args?.expected_url && ["ghost_click", "ghost_fill", "ghost_key", "ghost_scroll", "ghost_navigate", "ghost_vacuum"].includes(command)) {
+    const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
+    if (!tab || tab.url !== args.expected_url) throw typedError("TAB_CHANGED", "The tab address changed after approval");
+  }
+  if (args?.room_only && (command === "ghost_show" || command === "ghost_suggestion")) {
+    const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
+    if (!isAcceptedTab(tab)) throw typedError("ROOM_ACCESS_DENIED", "This tab is not accepted for the room");
+  }
+  if (isActorCall(args)) {
+    if (!ACTOR_RE.test(args.actor_id)) throw typedError("INVALID_ACTOR", "actor_id must be 1-64 of A-Z a-z 0-9 _ . : -");
+    if (!TABLESS_COMMANDS.has(command) && !Number.isInteger(args.tab_id)) {
+      throw typedError("TAB_REQUIRED", `${command} needs tab_id when called by an actor`);
+    }
+    if (command === "ghost_tab_switch") {
+      throw typedError("FORBIDDEN_FOR_ACTOR", "Actors never change which tab a human sees");
+    }
+  }
+  try {
+    return await routeCommand(command, args);
+  } catch (err) {
+    throw lifecycleError(err, args.tab_id);
   }
 }
 
@@ -238,6 +380,7 @@ async function handleCommand(command, args) {
 
 async function tabList() {
   const tabs = await chrome.tabs.query({});
+  const focusedWindow = await chrome.windows.getLastFocused().catch(() => null);
   return {
     tabs: tabs.map((t, i) => ({
       index: i,
@@ -245,13 +388,16 @@ async function tabList() {
       url: t.url,
       title: t.title,
       active: t.active,
+      focused: Boolean(focusedWindow && t.windowId === focusedWindow.id),
       windowId: t.windowId,
     })),
   };
 }
 
 async function tabOpen(args) {
-  const tab = await chrome.tabs.create({ url: args.url || "about:blank", active: args.active !== false });
+  // Actors open tabs in the background so the human's view never changes.
+  const active = isActorCall(args) ? false : args.active !== false;
+  const tab = await chrome.tabs.create({ url: args.url || "about:blank", active });
   return { id: tab.id, url: tab.url, title: tab.title };
 }
 
@@ -300,6 +446,10 @@ async function getActiveTabId(args) {
 async function navigate(args) {
   const url = args.url;
   if (!url) throw new Error("url is required");
+  // These download a file into the person's Downloads folder. Reading the sheet's own tab returns its cells.
+  if (isSheetExport(url)) {
+    throw new Error("NO_DOWNLOADS: export links download a file. Open the sheet itself and ghost_read it: the read includes its cells.");
+  }
 
   let tabId;
   if (args.tab_id) {
@@ -310,20 +460,62 @@ async function navigate(args) {
     tabId = active ? active.id : (await chrome.tabs.create({ url })).id;
   }
 
-  await chrome.tabs.update(tabId, { url, active: true });
-
-  // Wait for load
-  await waitForTabLoad(tabId, args.timeout || 30000);
+  const tab0 = await chrome.tabs.get(tabId);
+  if (tab0.url !== url) {
+    await refuseIfHumanViewing(args, tabId, "HUMAN_VIEWING", "ask them before navigating it away");
+    // Only a local, single-user call brings the tab to the front.
+    await chrome.tabs.update(tabId, isActorCall(args) ? { url } : { url, active: true });
+    await waitForTabLoad(tabId, args.timeout || 30000);
+  }
 
   const tab = await chrome.tabs.get(tabId);
 
   // If vacuum-style, also read the page
   if (args.command === "ghost_vacuum" || args.limit) {
-    const content = await readTabContent(tabId, args.limit || 30, args.selector);
-    return { id: tab.id, url: tab.url, title: tab.title, content };
+    const read = await readTabContent(tabId, args.limit || 30, args.selector, actorOf(args));
+    return { id: tab.id, url: tab.url, title: tab.title, content: await withSheetCells(tab, read.text, args.limit || 30), snapshot: read.snapshot };
   }
 
   return { id: tab.id, url: tab.url, title: tab.title };
+}
+
+// -- Google Sheets: the grid is drawn on a canvas, so the page has no cell text to read ----------
+
+const SHEET_RE = /^https:\/\/docs\.google\.com\/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{20,})/;
+
+const SHEET_CHARS = 30000;  // a whole tracker tab, so a bot can check names against it in one read
+
+function isSheetExport(url) {
+  return /^https:\/\/docs\.google\.com\/spreadsheets\//.test(url) && /\/export\b|\/gviz\/|[?&]output=csv|[?&]format=(csv|xlsx|pdf|ods|tsv)/.test(url);
+}
+
+// The open sheet's cells as CSV, fetched with the person's own Google session (nothing is downloaded).
+async function sheetCells(url, maxChars) {
+  const match = SHEET_RE.exec(url || "");
+  if (!match) return "";
+  const gid = /[#&?]gid=(\d+)/.exec(url)?.[1];
+  const response = await fetch(`https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv${gid ? `&gid=${gid}` : ""}`,
+    { credentials: "include", cache: "no-store", redirect: "follow" });
+  const type = response.headers.get("content-type") || "";
+  if (!response.ok || type.includes("html")) return "";
+  const reader = response.body.getReader();
+  let text = "", decoder = new TextDecoder();
+  while (text.length < maxChars) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  reader.cancel().catch(() => {});
+  return text.slice(0, maxChars);
+}
+
+async function withSheetCells(tab, text, maxChars) {
+  if (!SHEET_RE.test(tab.url || "")) return text;
+  let cells = "";
+  try { cells = await sheetCells(tab.url, SHEET_CHARS); } catch {}
+  return cells
+    ? `Cells of the open sheet tab, as CSV (first row is usually the header)${cells.length >= SHEET_CHARS ? ", cut off: the tab is bigger" : ""}:\n${cells}\n\nThe page around it:\n${text}`
+    : `${text}\n\n(The sheet's cells are drawn on a canvas and couldn't be fetched: the person may not have access.)`;
 }
 
 function waitForTabLoad(tabId, timeout = 30000) {
@@ -351,9 +543,9 @@ function waitForTabLoad(tabId, timeout = 30000) {
 
 async function readPage(args) {
   const tabId = await getActiveTabId(args);
-  const content = await readTabContent(tabId, args.max_chars || 4000, args.selector);
+  const read = await readTabContent(tabId, args.max_chars || 4000, args.selector, actorOf(args));
   const tab = await chrome.tabs.get(tabId);
-  return { url: tab.url, title: tab.title, content };
+  return { url: tab.url, title: tab.title, content: await withSheetCells(tab, read.text, args.max_chars || 4000), snapshot: read.snapshot };
 }
 
 async function fetchPdf(args) {
@@ -443,83 +635,43 @@ async function fetchPdf(args) {
   };
 }
 
-async function readTabContent(tabId, maxChars, selector) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (sel, max) => {
-      const el = sel ? document.querySelector(sel) : document.body;
-      if (!el) return { error: `Selector "${sel}" not found` };
+// A new id each time the extension is installed or reloaded. Pages keep the
+// scripts an older copy injected; the new scripts see the id change and replace them.
+chrome.runtime.onInstalled.addListener(() => {
+  buildId = Promise.resolve(String(Date.now()));
+  chrome.storage.local.set({ build: String(Date.now()) });
+});
+let buildId = chrome.storage.local.get("build").then(data => data.build || "0");
 
-      // Build a structured view of the page
-      const items = [];
-      let charCount = 0;
+async function injectScripts(tabId, files) {
+  const build = await buildId;
+  await chrome.scripting.executeScript({ target: { tabId }, func: b => { globalThis.__ghostBuild = b; }, args: [build] });
+  await chrome.scripting.executeScript({ target: { tabId }, files });
+}
 
-      function walk(node, depth) {
-        if (charCount >= max) return;
+async function injectPageHelpers(tabId) {
+  await injectScripts(tabId, ["ghost_page.js", "mote_image.js", "overlay.js"]);
+}
 
-        if (node.nodeType === Node.TEXT_NODE) {
-          const text = node.textContent.trim();
-          if (text) {
-            items.push(text);
-            charCount += text.length;
-          }
-          return;
-        }
+// Run a function in the page's isolated world after the Ghost helpers are
+// loaded. Chrome serializes `func`; it must catch its own errors and return
+// {value} or {error}, because MV3 isolated worlds do not allow eval.
+async function runInPage(tabId, func, args) {
+  await injectPageHelpers(tabId);
+  const [result] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+  if (!result) throw new Error("The page did not answer");
+  if (result.result?.error) throw new Error(result.result.error);
+  return result.result?.value;
+}
 
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-        const tag = node.tagName.toLowerCase();
-
-        // Skip hidden, scripts, styles
-        if (["script", "style", "noscript", "svg"].includes(tag)) return;
-        const style = window.getComputedStyle(node);
-        if (style.display === "none" || style.visibility === "hidden") return;
-
-        // Clickable elements get numbered
-        const clickable = tag === "a" || tag === "button" || tag === "input" ||
-          tag === "select" || tag === "textarea" || node.getAttribute("role") === "button" ||
-          node.getAttribute("onclick") || node.getAttribute("tabindex");
-
-        if (clickable) {
-          const label = node.textContent.trim().slice(0, 100) || node.getAttribute("aria-label") ||
-            node.getAttribute("placeholder") || node.getAttribute("title") || tag;
-          const href = node.getAttribute("href") || "";
-          const type = node.getAttribute("type") || "";
-          // Current form values can contain credentials or session material.
-          // Enumerate the control, but never send its value to the agent.
-          const value = (tag === "input" || tag === "textarea") && node.value
-            ? "[REDACTED]"
-            : "";
-
-          // Store element reference for clicking
-          node.setAttribute("data-ghost-id", items.length);
-
-          let desc = `[${items.length}] `;
-          if (tag === "a") desc += `link: ${label}` + (href ? ` (${href.slice(0, 80)})` : "");
-          else if (tag === "input") desc += `input(${type}): ${value || label}`;
-          else if (tag === "select") desc += `select: ${label}`;
-          else if (tag === "textarea") desc += `textarea: ${value || label}`;
-          else desc += `${tag}: ${label}`;
-
-          items.push(desc);
-          charCount += desc.length;
-          return; // Don't recurse into clickable children
-        }
-
-        for (const child of node.childNodes) {
-          if (charCount >= max) break;
-          walk(child, depth + 1);
-        }
-      }
-
-      walk(el, 0);
-      return { text: items.join("\n"), length: items.length };
+async function readTabContent(tabId, maxChars, selector, actor) {
+  return runInPage(
+    tabId,
+    (actor, max, sel) => {
+      try { return { value: globalThis.__ghostPage.enumerate(actor, max, sel) }; } catch (err) { return { error: err.message }; }
     },
-    args: [selector || null, maxChars],
-  });
-
-  if (!results || !results[0]) throw new Error("Failed to read page");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
-  return results[0].result?.text || "";
+    [actor, maxChars, selector || null],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -528,48 +680,28 @@ async function readTabContent(tabId, maxChars, selector) {
 
 async function click(args) {
   const tabId = await getActiveTabId(args);
-  const choice = args.choice;
+  if (args.choice === undefined && !args.selector) throw new Error("Provide choice (number) or selector");
 
-  if (choice === undefined && !args.selector) throw new Error("Provide choice (number) or selector");
-
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (choice, selector) => {
-      let el;
-      if (selector) {
-        el = document.querySelector(selector);
-      } else {
-        el = document.querySelector(`[data-ghost-id="${choice}"]`);
+  const result = await runInPage(
+    tabId,
+    (actor, choice, selector, announce) => {
+      try {
+        const done = globalThis.__ghostPage.click(actor, choice, selector);
+        // Each actor action also moves that actor's ring to what it touched.
+        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        return { value: done };
+      } catch (err) {
+        return { error: err.message };
       }
-      if (!el) return { error: `Element not found: ${selector || `choice ${choice}`}` };
-
-      // Scroll into view
-      el.scrollIntoView({ behavior: "instant", block: "center" });
-
-      // Dispatch real events
-      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      el.click();
-
-      return {
-        clicked: true,
-        tag: el.tagName.toLowerCase(),
-        text: (el.textContent || "").trim().slice(0, 100),
-      };
     },
-    args: [choice, args.selector || null],
-  });
-
-  if (!results || !results[0]) throw new Error("Click failed");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
+    [actorOf(args), args.choice ?? null, args.selector || null, isActorCall(args)],
+  );
 
   // Wait for potential navigation
   if (args.wait) {
     await new Promise(r => setTimeout(r, args.wait === "networkidle" ? 2000 : (parseInt(args.wait) || 1000)));
   }
-
-  return results[0].result;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -579,32 +711,23 @@ async function click(args) {
 async function fill(args) {
   const tabId = await getActiveTabId(args);
   const { selector, choice, value } = args;
-
   if (!value && value !== "") throw new Error("value is required");
+  if (choice === undefined && !selector) throw new Error("Provide choice (number) or selector");
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (choice, selector, value) => {
-      let el;
-      if (selector) el = document.querySelector(selector);
-      else if (choice !== undefined) el = document.querySelector(`[data-ghost-id="${choice}"]`);
-      else el = document.activeElement;
-
-      if (!el) return { error: "Element not found" };
-
-      el.focus();
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return { filled: true, tag: el.tagName.toLowerCase() };
+  return runInPage(
+    tabId,
+    (actor, choice, selector, value, announce) => {
+      try {
+        // Focus-free: sets the value directly, so a human typing elsewhere keeps their cursor.
+        const done = globalThis.__ghostPage.fill(actor, choice, selector, value);
+        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        return { value: done };
+      } catch (err) {
+        return { error: err.message };
+      }
     },
-    args: [choice, selector || null, value],
-  });
-
-  if (!results || !results[0]) throw new Error("Fill failed");
-  if (results[0].result?.error) throw new Error(results[0].result.error);
-  return results[0].result;
+    [actorOf(args), choice ?? null, selector || null, value, isActorCall(args)],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +736,27 @@ async function fill(args) {
 
 async function sendKey(args) {
   const tabId = await getActiveTabId(args);
+  const targeted = args.choice !== undefined || Boolean(args.selector);
+
+  // Text aimed at one element is written there without focus, like fill.
+  if (args.text && targeted) {
+    return runInPage(
+      tabId,
+      (actor, choice, selector, text, announce) => {
+        try {
+          const done = globalThis.__ghostPage.typeInto(actor, choice, selector, text);
+          if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+          return { value: done };
+        } catch (err) {
+          return { error: err.message };
+        }
+      },
+      [actorOf(args), args.choice ?? null, args.selector || null, args.text, isActorCall(args)],
+    );
+  }
+
+  // Untargeted keys go to whatever has focus, which may be the human's cursor.
+  await refuseIfHumanViewing(args, tabId, "HUMAN_ACTIVE", "target an element with choice or selector instead of the focused one");
 
   // If it's text to type, use a different approach
   if (args.text) {
@@ -769,6 +913,10 @@ async function screenshot(args) {
     : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
 
   if (!tab) throw new Error("No tab to screenshot");
+  if (!tab.active) {
+    // captureVisibleTab only sees the selected tab; capturing another would mean switching the human's view.
+    throw typedError("BACKGROUND_CAPTURE_UNSUPPORTED", `Tab ${tab.id} is not showing; Chrome can only capture the visible tab. Use ghost_read instead.`);
+  }
 
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
     format: args.format || "png",
@@ -778,12 +926,43 @@ async function screenshot(args) {
   return { dataUrl, width: tab.width, height: tab.height };
 }
 
+const MAX_CROP_CHARS = 1024 * 1024;
+const MAX_CROP_SIDE = 1280;
+
+/** A JPEG of one area of the tab the human is looking at; rect is in CSS pixels of the viewport. */
+async function cropVisible(tab, rect) {
+  const nums = ["x", "y", "w", "h", "vw"].map(k => Number(rect[k]));
+  if (nums.some(n => !Number.isFinite(n)) || nums[2] < 1 || nums[3] < 1 || nums[4] < 1) return null;
+  const [x, y, w, h, vw] = nums;
+  const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const bitmap = await createImageBitmap(await (await fetch(shot)).blob());
+  const ratio = bitmap.width / vw; // device pixels per CSS pixel
+  const sx = Math.max(0, Math.round(x * ratio));
+  const sy = Math.max(0, Math.round(y * ratio));
+  const sw = Math.min(bitmap.width - sx, Math.round(w * ratio));
+  const sh = Math.min(bitmap.height - sy, Math.round(h * ratio));
+  if (sw < 1 || sh < 1) return null;
+  const scale = Math.min(1, MAX_CROP_SIDE / Math.max(sw, sh));
+  const canvas = new OffscreenCanvas(Math.max(1, Math.round(sw * scale)), Math.max(1, Math.round(sh * scale)));
+  canvas.getContext("2d").drawImage(bitmap, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  for (const quality of [0.85, 0.6, 0.4]) {
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const url = `data:image/jpeg;base64,${btoa(binary)}`;
+    if (url.length <= MAX_CROP_CHARS) return url;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Scroll
 // ---------------------------------------------------------------------------
 
 async function scroll(args) {
   const tabId = await getActiveTabId(args);
+  await refuseIfHumanViewing(args, tabId, "HUMAN_ACTIVE", "scrolling would move their view");
   const direction = args.direction || "down";
   const amount = args.amount || 500;
 
@@ -832,21 +1011,626 @@ async function wait(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Message handler for popup and content scripts
+// Presence overlay — show what an actor is working on, without editing
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+async function showPresence(args) {
+  const tabId = await getActiveTabId(args);
+  const spec = {
+    actor_id: args.actor_id,
+    label: args.label,
+    color: args.color,
+    owner_color: args.owner_color,
+    kind: args.kind === "human" ? "human" : "bot",
+    status: args.status,
+    ttl_ms: args.ttl_ms,
+    choice: args.choice,
+    selector: args.selector,
+    text: args.text,
+    rect: args.rect,
+    anchor: args.anchor,
+    pointer: args.pointer,
+  };
+  const value = await runInPage(
+    tabId,
+    (spec, clear) => {
+      try {
+        const overlay = globalThis.__ghostOverlay;
+        if (clear) return { value: overlay.clear(spec.actor_id) };
+        return { value: { ...overlay.show(spec), showing: overlay.list() } };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    [spec, Boolean(args.clear)],
+  );
+  return { tab_id: tabId, ...value };
+}
+
+async function suggestHere(args) {
+  const tabId = await getActiveTabId(args);
+  if (!isActorCall(args)) throw typedError("ACTOR_REQUIRED", "Suggestions come from an actor; set --actor or GHOST_ACTOR_ID");
+  const id = typeof args.id === "string" && args.id ? args.id : `${args.actor_id}-${Date.now().toString(36)}`;
+  const value = await runInPage(
+    tabId,
+    (spec) => {
+      try {
+        const overlay = globalThis.__ghostOverlay;
+        overlay.onResolve ??= (id, decision) => chrome.runtime.sendMessage({ type: "resolve", id, decision });
+        return { value: overlay.suggest(spec) };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    [{
+      id, actor_id: args.actor_id, actor: { id: args.actor_id, name: args.actor_id },
+      title: args.title, body: args.body, choice: args.choice, selector: args.selector, text: args.text, rect: args.rect,
+      anchor: args.anchor, kind: args.kind, reply_to: args.reply_to,
+      thread: args.thread, href: args.href, question: args.question,
+    }],
+  );
+  return { tab_id: tabId, ...value };
+}
+
+async function drawSuggestion(args) {
+  const tabId = args.tab_id;
+  // A conversation the human closed (and saved) stays closed when the page redraws.
+  if (!args.clear && args.thread && closedThreads.has(args.thread)) return { skipped: "closed" };
+  if (reelOn && !args.clear && args.kind === "note" && args.question) {
+    // An answer: capture it once the card is on the page.
+    chrome.tabs.get(tabId).then(tab => setTimeout(() => reelCapture(tab, {
+      kind: "answer", question: args.question, answer: { title: args.title || "", body: args.body || "" },
+      by: args.actor?.name || args.actor?.id || "bot",
+    }), 700)).catch(() => {});
+  }
+  return runInPage(
+    tabId,
+    (spec, clear) => {
+      try {
+        const overlay = globalThis.__ghostOverlay;
+        overlay.onResolve ??= (id, decision) => chrome.runtime.sendMessage({ type: "resolve", id, decision });
+        if (clear) return { value: { removed: overlay.unsuggest(spec.id) } };
+        return { value: overlay.suggest(spec) };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    [{
+      id: args.id, actor: args.actor, title: args.title, body: args.body, anchor: args.anchor,
+      kind: args.kind, question: args.question, href: args.href,
+      thread: args.thread, reply_to: args.reply_to, text: args.text,
+    }, Boolean(args.clear)],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Room: which pages are shared, and where the local human is working on them
+// ---------------------------------------------------------------------------
+
+let sharedPages = new Set();
+let sharedPageDetails = new Map();
+const acceptedSharedTabs = new Map(); // tab id -> {url: exact local URL, roomUrl: opaque page ID}
+const manuallyShared = new Map(); // tab id -> page key shared from the side panel
+const stoppedByHuman = new Set(); // unshared from the side panel, so following leaves them alone
+let roomMe = null;
+
+// Same rule as ghost_room.page_key: origin + path, no query or fragment.
+function pageKey(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "") || "/"}`;
+  } catch {
+    return null;
+  }
+}
+
+function siteOrigin(url) {
+  try {
+    const u = new URL(url);
+    return ["http:", "https:"].includes(u.protocol) ? `${u.origin}/` : null;
+  } catch { return null; }
+}
+
+function newRoomPageUrl() {
+  return `https://room.invalid/p/${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function isShared(url) {
+  const key = pageKey(url);
+  return Boolean(key && [...acceptedSharedTabs.values()].some(entry =>
+    pageKey(entry.url) === key && sharedPages.has(entry.roomUrl)));
+}
+
+function isAcceptedTab(tab) {
+  const entry = tab && acceptedSharedTabs.get(tab.id);
+  const page = entry && sharedPageDetails.get(entry.roomUrl);
+  return Boolean(entry && page && entry.url === tab.url && siteOrigin(tab.url) === page.origin);
+}
+
+function setRoomAccess(tab, accepted, roomUrl = null) {
+  const key = pageKey(tab?.url);
+  if (!Number.isInteger(tab?.id)) return;
+  const previous = acceptedSharedTabs.get(tab.id);
+  if (accepted && key && typeof roomUrl === "string" && roomUrl.startsWith("https://room.invalid/p/")) {
+    acceptedSharedTabs.set(tab.id, { url: tab.url, roomUrl });
+  }
+  else acceptedSharedTabs.delete(tab.id);
+  toBridge({ type: "room_access", tab_id: tab.id, url: tab.url || "",
+             room_url: roomUrl || previous?.roomUrl, accepted: acceptedSharedTabs.has(tab.id) });
+}
+
+async function tabMeta(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return tab ? { tab_id: tab.id, url: tab.url, title: tab.title } : null;
+}
+
+async function trackHuman(tabId) {
+  await injectScripts(tabId, ["ghost_page.js", "mote_image.js", "overlay.js", "human_presence.js"]).catch(() => {});
+  await applyModes(tabId);
+}
+
+let modes = { immersive: false, skip: false };
+// The language bots answer this person in.
+let language = "English";
+
+function cleanLanguage(value) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+  return /^[\p{L}][\p{L}\p{M} ()-]*$/u.test(text) ? text : "English";
+}
+
+async function applyModes(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId }, func: m => globalThis.__ghostOverlay?.setModes?.(m), args: [modes],
+  }).catch(() => {});
+}
+
+async function untrackHuman(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      globalThis.__ghostHumanStop?.();
+      globalThis.__ghostOverlay?.reset?.();
+    },
+  }).catch(() => {});
+}
+
+async function setSharedPages(pages, me) {
+  const before = sharedPages;
+  sharedPageDetails = new Map((Array.isArray(pages) ? pages : [])
+    .filter(page => page && typeof page.url === "string" && page.url.startsWith("https://room.invalid/p/")
+      && pageKey(page.url) === page.url && siteOrigin(page.origin) === page.origin)
+    .map(page => [page.url, page]));
+  sharedPages = new Set(sharedPageDetails.keys());
+  roomMe = me && typeof me === "object" ? me : null;
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    const entry = acceptedSharedTabs.get(tab.id);
+    if (entry && (!sharedPages.has(entry.roomUrl) || entry.url !== tab.url)) {
+      setRoomAccess(tab, false);
+    }
+    if (entry && before.has(entry.roomUrl) && !sharedPages.has(entry.roomUrl)) {
+      // No longer shared: clean the page.
+      await untrackHuman(tab.id);
+    } else if (isAcceptedTab(tab)) {
+      setRoomAccess(tab, true, entry.roomUrl); // restore bridge consent after a reconnect
+      await trackHuman(tab.id);
+      ws?.send(JSON.stringify({ type: "tab_ready", tab_id: tab.id, url: tab.url }));
+    }
+  }
+}
+
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (!connected || !ws) return;
+  if (acceptedSharedTabs.has(tabId) && acceptedSharedTabs.get(tabId).url !== tab.url) setRoomAccess(tab, false);
+  if (info.status !== "complete") return;
+  if (isAcceptedTab(tab)) {
+    ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
+    await trackHuman(tabId);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Follow me: keep the tab the human is looking at shared with the room
+// ---------------------------------------------------------------------------
+
+let following = false;
+let followedUrl = null; // shared by following, so following may unshare it
+let followedTabId = null;
+let followedRoomUrl = null;
+
+async function leaveFollowedTab() {
+  const keptByOwner = manuallyShared.get(followedTabId) === followedUrl;
+  if (followedRoomUrl && !keptByOwner) {
+    toBridge({ type: "unshare", url: followedRoomUrl });
+  }
+  if (Number.isInteger(followedTabId)) {
+    const tab = await chrome.tabs.get(followedTabId).catch(() => null);
+    if (tab && !keptByOwner) {
+      setRoomAccess(tab, false);
+      await untrackHuman(followedTabId);
+    }
+  }
+  followedUrl = null;
+  followedTabId = null;
+  followedRoomUrl = null;
+}
+
+async function followActiveTab() {
+  if (!following || !connected) return;
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const key = tab && pageKey(tab.url);
+  if (!key || (key === followedUrl && tab.id === followedTabId
+      && acceptedSharedTabs.get(tab.id)?.url === tab.url
+      && acceptedSharedTabs.get(tab.id)?.roomUrl === followedRoomUrl)) return;
+  if (stoppedByHuman.has(key)) {
+    // The human stopped sharing this page; following doesn't share it again.
+    await leaveFollowedTab();
+    return;
+  }
+  // Leave the last followed page, unless the human shared it themselves.
+  if (followedTabId !== tab.id || followedUrl !== key) await leaveFollowedTab();
+  const accepted = acceptedSharedTabs.get(tab.id);
+  if (isAcceptedTab(tab) && sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id) return;
+  followedUrl = key;
+  followedTabId = tab.id;
+  followedRoomUrl = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : newRoomPageUrl();
+  if (!followedRoomUrl) followedRoomUrl = newRoomPageUrl();
+  setRoomAccess(tab, true, followedRoomUrl);
+  if (!sharedPages.has(followedRoomUrl)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: followedRoomUrl });
+}
+
+async function setFollow(on) {
+  following = on;
+  await chrome.storage.local.set({ follow: on });
+  if (on) {
+    followActiveTab();
+  } else {
+    await leaveFollowedTab();
+  }
+}
+
+chrome.tabs.onActivated.addListener(() => followActiveTab());
+chrome.windows.onFocusChanged.addListener(id => { if (id !== chrome.windows.WINDOW_ID_NONE) followActiveTab(); });
+chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active) followActiveTab(); });
+
+// ---------------------------------------------------------------------------
+// Reel mode: a screenshot of every shared page the human visits and of every
+// answer a bot gives there, stacked in reel.html in the order they happened
+// ---------------------------------------------------------------------------
+
+let reelOn = false;
+let lastShot = 0;
+const lastPageShot = new Map(); // page -> time, so reloads don't repeat it
+
+async function reelCapture(tab, extra) {
+  if (!reelOn || !tab?.active || !isAcceptedTab(tab)) return;
+  // Chrome allows about two captures a second.
+  const wait = lastShot + 600 - Date.now();
+  if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+  lastShot = Date.now();
+  try {
+    const fresh = await chrome.tabs.get(tab.id);
+    if (!fresh.active || fresh.url !== tab.url || !isAcceptedTab(fresh)) return;
+    const image = await chrome.tabs.captureVisibleTab(fresh.windowId, { format: "jpeg", quality: 70 });
+    const after = await chrome.tabs.get(tab.id);
+    if (after.url !== fresh.url || !isAcceptedTab(after)) return;
+    await reelAdd({ ts: Date.now(), url: fresh.url, title: fresh.title || "", image, ...extra });
+    chrome.runtime.sendMessage({ type: "reel-added" }).catch(() => {});
+  } catch {}
+}
+
+const closedThreads = new Set();
+chrome.storage.session.get("closedThreads").then(data => (data.closedThreads || []).forEach(t => closedThreads.add(t))).catch(() => {});
+
+async function reelAddReport(args) {
+  if (args.kind !== "report" || typeof args.markdown !== "string") throw new Error("Only reports can be added");
+  const id = await reelAdd({
+    ts: Date.now(), kind: "report", title: String(args.title || "Session report").slice(0, 200),
+    markdown: args.markdown.slice(0, 200000), by: String(args.by || "").slice(0, 64), url: "", image: null,
+  });
+  chrome.runtime.sendMessage({ type: "reel-added" }).catch(() => {});
+  return { added: id };
+}
+
+// A conversation the human closed: saved to the reel with a picture of it.
+async function saveConversation(tab, conversation) {
+  closedThreads.add(conversation.thread);
+  chrome.storage.session.set({ closedThreads: [...closedThreads].slice(-500) }).catch(() => {});
+  let image = null;
+  try {
+    if (tab.active && isAcceptedTab(tab)) {
+      image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+      const after = await chrome.tabs.get(tab.id);
+      if (after.url !== tab.url || !isAcceptedTab(after)) image = null;
+    }
+  } catch {}
+  const turns = (Array.isArray(conversation.turns) ? conversation.turns : []).slice(0, 100).map(t => ({
+    q: String(t?.q || "").slice(0, 600), by: String(t?.by || "").slice(0, 80),
+    a: t?.a ? { title: String(t.a.title || "").slice(0, 120), body: String(t.a.body || "").slice(0, 600), by: String(t.a.by || "").slice(0, 80) } : null,
+  }));
+  await reelAdd({ ts: Date.now(), kind: "conversation", url: tab.url, title: tab.title || "", image, turns });
+  chrome.runtime.sendMessage({ type: "reel-added" }).catch(() => {});
+}
+
+function reelPage(tab) {
+  const key = pageKey(tab.url);
+  if (!reelOn || !isAcceptedTab(tab) || !key || Date.now() - (lastPageShot.get(key) || 0) < 30000) return;
+  lastPageShot.set(key, Date.now());
+  // Give the page a moment to draw.
+  setTimeout(() => reelCapture(tab, { kind: "page" }), 1500);
+}
+
+chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active && isAcceptedTab(tab)) reelPage(tab); });
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && tab.status === "complete" && isAcceptedTab(tab)) reelPage(tab);
+});
+
+// ---------------------------------------------------------------------------
+// Message handler for the side panel and content scripts
+// ---------------------------------------------------------------------------
+
+function toBridge(message) {
+  if (connected && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
+
+// A closed tab takes its bot off Mia's list, whether or not the panel is open.
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (acceptedSharedTabs.has(tabId)) {
+    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId).url,
+               room_url: acceptedSharedTabs.get(tabId).roomUrl, accepted: false });
+    acceptedSharedTabs.delete(tabId);
+  }
+  toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
+});
+
+// ---------------------------------------------------------------------------
+// Mia's chat: the side panel talks to the bridge through here
+// ---------------------------------------------------------------------------
+
+let chatState = null;
+const CHAT_ACTIONS = new Set(["claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat"]);
+
+// What the person is looking at: the tab, the text they selected and the links inside it.
+async function chatTab() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !/^https?:/.test(tab.url || "")) return tab ? { id: null, url: tab.url || "", title: tab.title || "" } : {};
+  let picked = {};
+  try {
+    const [run] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const sel = getSelection();
+        const text = String(sel || "").slice(0, 3000);
+        const links = [];
+        for (let i = 0; i < sel.rangeCount && links.length < 30; i++) {
+          const box = sel.getRangeAt(i).cloneContents();
+          for (const a of box.querySelectorAll("a[href]")) {
+            if (links.length >= 30) break;
+            links.push({ text: (a.textContent || "").trim().slice(0, 100), href: a.href.slice(0, 500) });
+          }
+        }
+        return { text, links };
+      },
+    });
+    picked = run?.result || {};
+  } catch {}
+  return { id: tab.id, url: tab.url, title: tab.title || "", selection: picked.text || "", links: picked.links || [] };
+}
+
+async function chatFromPanel(msg) {
+  if (!CHAT_ACTIONS.has(msg.action)) return { ok: false, error: "Unknown action" };
+  if (!(connected && ws && ws.readyState === WebSocket.OPEN)) return { ok: false, error: "Mia isn't connected to the Ghost bridge" };
+  const chat = { action: msg.action, task: typeof msg.task === "string" ? msg.task.slice(0, 32) : undefined,
+                 agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
+                 chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined };
+  if (msg.action === "send") {
+    Object.assign(chat, {
+      text: String(msg.text || "").slice(0, 2000), mode: msg.mode === "do" ? "do" : "ask",
+      run: msg.run === "queue" ? "queue" : "parallel", model: String(msg.model || "").slice(0, 60),
+      tab: await chatTab(), language, owner_color: roomMe?.color || "",
+    });
+  }
+  toBridge({ type: "chat", chat });
+  return { ok: true };
+}
+
+// The toolbar icon opens Mia's side panel, which also holds the settings.
+chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => {});
+
+// Keyboard shortcuts: crop an area, ask about the selected text, or open Mia's chat.
+chrome.commands?.onCommand.addListener(async (command, tab) => {
+  if (command === "open-chat") {
+    const windowId = tab?.windowId ?? (await chrome.windows.getLastFocused()).id;
+    chrome.sidePanel.open({ windowId }).catch(() => {});
+    return;
+  }
+  tab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+  if (!tab || !["crop-ask", "text-ask"].includes(command)) return;
+  const shared = isShared(tab.url);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (mode, ok) => {
+        const overlay = globalThis.__ghostOverlay;
+        if (!ok) return overlay?.toast?.("Share this page with the room to ask about it");
+        if (mode === "crop-ask") overlay?.startCrop();
+        else overlay?.askSelection();
+      },
+      args: [command, shared],
+    });
+  } catch {}
+});
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "get-status") {
-    sendResponse(getStatus());
+    Promise.all([chrome.tabs.query({ active: true, currentWindow: true }), chrome.tabs.query({})]).then(([[tab], tabs]) => {
+      sendResponse({
+        ...getStatus(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isAcceptedTab(tab)),
+        room: roomMe ? { me: roomMe, shared: [...sharedPages], pages: [...sharedPageDetails.values()],
+                         accepted: tabs.filter(isAcceptedTab).map(tab => acceptedSharedTabs.get(tab.id).roomUrl) } : null,
+      });
+    });
+    return true;
+  }
+  // From the human tracker in a shared page.
+  if (msg.type === "human_presence" && sender.tab && isAcceptedTab(sender.tab)) {
+    toBridge({ type: "human", tab_id: sender.tab.id, url: sender.tab.url, status: msg.status, focus: msg.focus, pointer: msg.pointer });
     return false;
+  }
+  // A human clicked Accept or Reject on a suggestion card.
+  if (msg.type === "resolve" && sender.tab && typeof msg.id === "string") {
+    toBridge({ type: "resolve", id: msg.id, decision: msg.decision });
+    return false;
+  }
+  // A human selected text on a shared page and asked the bots about it.
+  if (msg.type === "ask" && sender.tab && isAcceptedTab(sender.tab) && typeof msg.question === "string") {
+    const image = typeof msg.image === "string" && msg.image.startsWith("data:image/jpeg;base64,") && msg.image.length <= MAX_CROP_CHARS
+      ? msg.image : null;
+    toBridge({
+      type: "ask", tab_id: sender.tab.id, url: sender.tab.url, question: msg.question.slice(0, 600),
+      text: typeof msg.text === "string" ? msg.text.slice(0, 4000) : "", target: msg.target, image,
+      thread: typeof msg.thread === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(msg.thread) ? msg.thread : undefined,
+      links: Array.isArray(msg.links) ? msg.links.slice(0, 8) : [],
+      language,
+    });
+    return false;
+  }
+  // The human stopped a question they asked on the page.
+  if (msg.type === "ask_cancel" && sender.tab && typeof msg.id === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(msg.id)) {
+    toBridge({ type: "ask_cancel", tab_id: sender.tab.id, id: msg.id });
+    return false;
+  }
+  // The human cropped an area of a shared page: take its picture.
+  if (msg.type === "capture" && sender.tab && isAcceptedTab(sender.tab) && msg.rect) {
+    cropVisible(sender.tab, msg.rect).then(image => sendResponse({ image }), () => sendResponse({ image: null }));
+    return true;
+  }
+  if (msg.type === "conversation" && sender.tab && msg.conversation && typeof msg.conversation.thread === "string") {
+    saveConversation(sender.tab, msg.conversation).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+    return true;
+  }
+  if (msg.type === "modes") {
+    modes = { immersive: Boolean(msg.immersive), skip: Boolean(msg.skip) };
+    chrome.storage.local.set({ modes }).then(async () => {
+      for (const tab of await chrome.tabs.query({})) if (isShared(tab.url)) await applyModes(tab.id);
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  if (msg.type === "language") {
+    language = cleanLanguage(msg.language);
+    chrome.storage.local.set({ language }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  // Mia's side panel: what the person typed, approvals, stops.
+  if (msg.type === "chat" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
+    chatFromPanel(msg).then(sendResponse, err => sendResponse({ ok: false, error: `Ghost couldn't send that: ${err?.message || err}` }));
+    return true;
+  }
+  if (msg.type === "chat-last" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
+    sendResponse({ state: chatState, connected: Boolean(connected), room: roomMe ? { me: roomMe } : null });
+    return false;
+  }
+  // The reel page wants the words for its PDF: the bridge asks a model.
+  if (msg.type === "reel-story" && sender.url?.startsWith(chrome.runtime.getURL("reel.html"))) {
+    if (!(connected && ws && ws.readyState === WebSocket.OPEN)) {
+      sendResponse({ ok: false, error: "Ghost isn't connected to the bridge" });
+      return false;
+    }
+    toBridge({ type: "reel_story", id: String(msg.id || "").slice(0, 32), moments: Array.isArray(msg.moments) ? msg.moments.slice(0, 200) : [], language });
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (msg.type === "reel") {
+    reelOn = Boolean(msg.on);
+    chrome.storage.local.set({ reel: reelOn }).then(() => sendResponse({ ok: true }));
+    if (reelOn) chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => tab && isAcceptedTab(tab) && reelPage(tab));
+    return true;
+  }
+  if (msg.type === "open-reel") {
+    const url = chrome.runtime.getURL("reel.html");
+    chrome.tabs.query({ url }).then(([open]) => (open
+      ? chrome.tabs.update(open.id, { active: true }).then(() => chrome.windows.update(open.windowId, { focused: true }))
+      : chrome.tabs.create({ url })));
+    return false;
+  }
+  // From the side panel: share the tab the human is on, wherever they go.
+  if (msg.type === "follow") {
+    setFollow(Boolean(msg.on)).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  // From the side panel: share or stop sharing the current tab with the room.
+  if (msg.type === "share-tab" || msg.type === "unshare-tab") {
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (!tab || !pageKey(tab.url)) return sendResponse({ ok: false, error: "Only http(s) pages can be shared" });
+      const key = pageKey(tab.url);
+      if (msg.type === "share-tab") {
+        const roomUrl = newRoomPageUrl();
+        toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: roomUrl,
+                   share_link: msg.share_link === true });
+        manuallyShared.set(tab.id, key);
+        stoppedByHuman.delete(key);
+        setRoomAccess(tab, true, roomUrl);
+      } else {
+        const entry = acceptedSharedTabs.get(tab.id);
+        if (entry && sharedPageDetails.get(entry.roomUrl)?.by === roomMe?.id) {
+          toBridge({ type: "unshare", tab_id: tab.id, url: entry.roomUrl });
+        }
+        manuallyShared.delete(tab.id);
+        stoppedByHuman.add(key);
+        if (followedUrl === key && followedTabId === tab.id) {
+          followedUrl = null; followedTabId = null; followedRoomUrl = null;
+        }
+        setRoomAccess(tab, false);
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  if (msg.type === "accept-shared-page" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
+    (async () => {
+      const key = msg.url;
+      const page = sharedPageDetails.get(key);
+      if (typeof key !== "string" || !page || !sharedPages.has(key)) {
+        return { ok: false, error: "That page is no longer shared" };
+      }
+      let tab;
+      if (msg.mode === "current") {
+        [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab) return { ok: false, error: "There is no current tab" };
+        if (siteOrigin(tab.url) !== page.origin) return { ok: false, error: `Open a page on ${page.origin} first` };
+      } else if (msg.mode === "new" && page.href) {
+        tab = await chrome.tabs.create({ url: page.href, active: true });
+      } else {
+        return { ok: false, error: "The sharer did not provide a full link; use a tab already on this site" };
+      }
+      let loaded = await chrome.tabs.get(tab.id);
+      if (loaded.status !== "complete") await waitForTabLoad(tab.id, 15000);
+      loaded = await chrome.tabs.get(tab.id);
+      if (siteOrigin(loaded.url) !== page.origin) return { ok: false, error: "The tab is on a different site" };
+      setRoomAccess(loaded, true, key);
+      await trackHuman(tab.id);
+      toBridge({ type: "tab_ready", tab_id: tab.id, url: loaded.url });
+      return { ok: true };
+    })().then(sendResponse, err => sendResponse({ ok: false, error: err?.message || String(err) }));
+    return true;
   }
   if (msg.type === "connect") {
     port = msg.port || DEFAULT_PORT;
-    token = (msg.token || "").trim();
-    if (!token) {
-      sendResponse({ ok: false, error: "Pairing token is required" });
-      return false;
+    const typed = (msg.token || "").trim();
+    // An empty box means: pair and start the bridge automatically.
+    if (!typed) {
+      disconnect();
+      intentionallyDisconnected = false;
+      pairAutomatically().then(ok => {
+        if (ok) connect();
+        sendResponse(ok ? { ok: true } : { ok: false, error: "Couldn't start Ghost on this computer. Run ./install-extension.sh once, then try again." });
+      });
+      return true;
     }
+    token = typed;
     chrome.storage.local.set({ port, token }, () => {
       disconnect();
       intentionallyDisconnected = false;
@@ -867,7 +1651,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // Startup
 // ---------------------------------------------------------------------------
 
-chrome.storage.local.get(["port", "token"], (data) => {
+chrome.storage.local.get(["port", "token", "follow", "reel", "modes", "language"], (data) => {
+  language = cleanLanguage(data.language);
+  following = Boolean(data.follow);
+  if (data.modes) modes = { immersive: Boolean(data.modes.immersive), skip: Boolean(data.modes.skip) };
+  reelOn = Boolean(data.reel);
   if (data.port) port = data.port;
   if (data.token) token = data.token;
   setBadge(token ? "OFF" : "PAIR", token ? "#ef4444" : "#f59e0b");

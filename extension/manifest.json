@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Ghost Bridge",
-  "version": "0.4.0",
-  "description": "Authenticated native Chrome bridge for ghost-cli.",
+  "name": "Mia",
+  "version": "0.5.0",
+  "description": "Mia, your browser assistant: she and her bots read, compare and act on your tabs with you.",
   "permissions": [
     "tabs",
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "nativeMessaging",
+    "unlimitedStorage",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -16,16 +19,55 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
     "default_icon": {
-      "16": "icons/ghost-16.png",
-      "48": "icons/ghost-48.png",
-      "128": "icons/ghost-128.png"
-    }
+      "16": "icons/mia-16.png",
+      "32": "icons/mia-32.png",
+      "48": "icons/mia-48.png",
+      "128": "icons/mia-128.png"
+    },
+    "default_title": "Open Mia"
   },
   "icons": {
-    "16": "icons/ghost-16.png",
-    "48": "icons/ghost-48.png",
-    "128": "icons/ghost-128.png"
+    "16": "icons/mia-16.png",
+    "32": "icons/mia-32.png",
+    "48": "icons/mia-48.png",
+    "128": "icons/mia-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://docs.google.com/*"
+      ],
+      "js": [
+        "canvas_text.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    }
+  ],
+  "minimum_chrome_version": "116",
+  "commands": {
+    "crop-ask": {
+      "suggested_key": {
+        "default": "Alt+Shift+A"
+      },
+      "description": "Crop an area of a shared page and ask the bots about it"
+    },
+    "text-ask": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Ask the bots about the selected text"
+    },
+    "open-chat": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      },
+      "description": "Open Mia's chat in the side panel"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   }
 }

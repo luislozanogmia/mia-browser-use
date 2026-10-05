@@ -12,6 +12,7 @@ playwright_auth.json
 linkedin_auth.json
 automations/linkedin/browser_context/
 *.lock
+!packaging/requirements.lock
 *.pid
 ghost_daemon.pid
 ghost_chrome_proxy.pid
@@ -25,3 +26,7 @@ backup/
 *.bak-*
 *.prev-*
 .DS_Store
+build/
+
+# Local Claude Code settings
+.claude/

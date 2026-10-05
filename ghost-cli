@@ -1,7 +1,3 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-PYTHON_BIN="${GHOST_PYTHON:-python3}"
-exec "$PYTHON_BIN" "$SCRIPT_DIR/ghost_cli.py" "$@"
+# Old name of mia-browser-use, kept so existing scripts and hooks keep working.
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mia-browser-use" "$@"

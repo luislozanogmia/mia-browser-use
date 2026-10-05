@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghost reel</title>
+<style>
+  :root { --bg: #f4f4f5; --fg: #111; --muted: #6b7280; --card: #fff; --line: #e5e7eb; --accent: #d97706; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111113; --fg: #f4f4f5; --muted: #9ca3af; --card: #1c1c1f; --line: #2c2c31; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; }
+  header .count { color: var(--muted); font-size: 12px; flex: 1; }
+  header button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+                  border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .entry { margin: 0 0 28px; }
+  .meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); margin: 0 0 6px; flex-wrap: wrap; }
+  .meta a { color: var(--fg); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+  .meta a:hover { text-decoration: underline; }
+  .kind { font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; font-size: 10px; }
+  .shot { display: block; width: 100%; border-radius: 8px; border: 1px solid var(--line); background: var(--card); }
+  .qa { margin: 8px 0 0; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; }
+  .qa .q { color: var(--muted); font-style: italic; margin: 0 0 4px; }
+  .qa .t { font-weight: 600; margin: 0 0 2px; }
+  .qa .b { margin: 0; }
+  .qa .b { margin: 0 0 8px; }
+  .report { background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 8px; padding: 14px 20px; }
+  .report button { float: right; font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+                   border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  .md { max-width: 760px; }
+  .md h2 { font-size: 22px; margin: 4px 0 10px; }
+  .md h3 { font-size: 17px; margin: 18px 0 6px; }
+  .md h4, .md h5 { font-size: 15px; margin: 14px 0 4px; }
+  .md p, .md li { line-height: 1.55; }
+  .md a { color: var(--accent); }
+  .empty { color: var(--muted); text-align: center; margin-top: 80px; }
+
+  /* ---- The booklet: on screen as sheets, in print as A4 pages ---- */
+  #book { display: none; }
+  body.booking { background: #e9e5de; }
+  body.booking > header, body.booking > main { display: none; }
+  body.booking #book { display: block; }
+  .b-bar { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: rgba(233,229,222,.9); backdrop-filter: blur(8px); border-bottom: 1px solid #d9d2c6;
+           font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #3f3a34; }
+  .b-bar .b-note { flex: 1; color: #6b625a; font-size: 12px; }
+  .b-bar button, header button.primary { font: inherit; font-size: 12px; border: 1px solid #d9d2c6; background: #fff; color: #1a1714;
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .b-bar button.primary, header button.primary { background: #1a1714; color: #fbf8f3; border-color: #1a1714; }
+  header button.primary:disabled { opacity: .6; cursor: progress; }
+
+  /* A report that is mostly pictures (about 70/30), and no text under 12px. */
+  .b-book { --paper: #fbf8f3; --ink: #1a1714; --soft: #3f3a34; --muted: #7d7369; --line: #e6ded2;
+            --accent: #c2410c; --accent-2: #d97706; --tint: #fbeedd;
+            --serif: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+            --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif;
+            color: var(--ink); font: 13px/1.5 var(--sans); font-feature-settings: "kern", "liga";
+            -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .b-book > section { box-sizing: border-box; width: 210mm; margin: 24px auto; padding: 14mm 14mm 16mm;
+                      background: var(--paper); box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 12px 32px rgba(40,30,20,.12); }
+
+  .b-mark { position: relative; display: inline-block; flex: none; width: 16px; height: 16px; border-radius: 50%;
+            background: var(--accent-2); box-shadow: 0 0 0 2px var(--paper), 0 0 0 3px var(--accent-2); }
+  .b-mark::before { content: ""; position: absolute; left: 4px; top: 5px; width: 2.5px; height: 3px; border-radius: 50%;
+                    background: #fff; box-shadow: 5px 0 0 #fff; }
+  .b-label { font: 700 12px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin: 0 0 12px; }
+  .b-n { font: 700 12px/1.5 var(--sans); color: var(--accent); font-variant-numeric: tabular-nums; }
+
+  .b-shot { border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #efe8dd; }
+  .b-shot img { display: block; width: 100%; height: auto; }
+
+  /* Cover: title, one big picture, then the gist in two columns */
+  .b-cover { position: relative; display: flex; flex-direction: column; height: 297mm; padding: 16mm 16mm 20mm !important;
+             background: radial-gradient(110% 50% at 100% 0%, var(--tint) 0%, transparent 60%), var(--paper) !important; }
+  .b-cover::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 4mm;
+                    background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .b-brand { display: flex; align-items: center; gap: 10px; font: 700 12px/1 var(--sans); letter-spacing: .16em; text-transform: uppercase; color: var(--soft); }
+  .b-date { margin-left: auto; font-weight: 500; letter-spacing: .04em; text-transform: none; color: var(--muted); }
+  .b-title { margin: 12mm 0 0; font: 600 40px/1.05 var(--serif); letter-spacing: -.015em; text-wrap: balance; }
+  .b-subtitle { margin: 3mm 0 0; font: italic 18px/1.4 var(--serif); color: var(--soft); text-wrap: pretty; }
+  .b-hero { flex: 1 1 0; display: flex; min-height: 70mm; margin: 9mm 0 0; }
+  .b-hero .b-shot { position: relative; flex: 1; border-radius: 10px; box-shadow: 0 10px 30px rgba(60,40,20,.14); }
+  .b-hero img { position: absolute; inset: 0; height: 100%; object-fit: cover; object-position: top left; }
+  .b-overview { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; margin: 9mm 0 0; }
+  .b-stats { grid-column: 1 / -1; display: flex; gap: 10mm; padding: 0 0 4mm; border-bottom: 1px solid var(--line); }
+  .b-stats div { display: flex; align-items: baseline; gap: 6px; }
+  .b-stats strong { font: 600 24px/1 var(--serif); }
+  .b-stats span { font-size: 12px; color: var(--muted); }
+  .b-summary { margin: 0; font: 15px/1.55 var(--serif); color: var(--soft); text-wrap: pretty; }
+  .b-takeaways { list-style: none; margin: 0; padding: 0; }
+  .b-takeaways li { display: grid; grid-template-columns: 26px 1fr; padding: 6px 0; border-top: 1px solid var(--line); break-inside: avoid; }
+  .b-takeaways li:first-child { border-top: 0; padding-top: 0; }
+  .b-takeaways li p { margin: 0; font-size: 13px; line-height: 1.45; }
+
+  /* Chapters: a slim heading, then pictures that fill the width */
+  .b-chead { display: grid; grid-template-columns: auto 1fr; column-gap: 5mm; align-items: baseline;
+             margin: 0 0 7mm; padding: 0 0 4mm; border-bottom: 2px solid var(--ink); }
+  .b-cnum { font: 600 28px/1 var(--serif); color: var(--accent); }
+  .b-chead h2 { margin: 0; font: 600 24px/1.15 var(--serif); letter-spacing: -.01em; text-wrap: balance; }
+  .b-chead p { grid-column: 2; margin: 2mm 0 0; font: italic 14px/1.45 var(--serif); color: var(--soft); }
+
+  .b-moment { margin: 0 0 9mm; break-inside: avoid; }
+  .b-moment .b-shot img { max-height: 170mm; object-fit: cover; object-position: top; }
+  .b-words { display: grid; grid-template-columns: 1fr; gap: 3px; margin: 3.5mm 0 0; padding: 0 1mm; }
+  .b-meta { display: flex; gap: 10px; align-items: baseline; margin: 0; font-size: 12px; color: var(--muted); }
+  .b-kind { font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  .b-time { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .b-q { margin: 2px 0 0; font: italic 14px/1.4 var(--serif); color: var(--ink); }
+  .b-q::before { content: "\201C"; color: var(--accent); font-weight: 700; margin-right: 1px; }
+  .b-q::after { content: "\201D"; color: var(--accent); font-weight: 700; margin-left: 1px; }
+  .b-caption { margin: 0; font-size: 13px; line-height: 1.45; color: var(--soft); text-wrap: pretty; }
+  .b-moment.no-image .b-words { padding: 4mm 5mm; background: var(--tint); border-radius: 8px; }
+  .b-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; margin: 0 0 9mm; break-inside: avoid; }
+  .b-pair .b-moment { margin: 0; }
+  .b-pair .b-shot img { max-height: 95mm; }
+
+  /* Diagrams the writer adds where a picture of the page can't make the point */
+  .b-visual { margin: 0 0 9mm; padding: 6mm; border-radius: 10px; background: var(--tint); break-inside: avoid; }
+  .b-visual.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(30mm, 1fr)); gap: 5mm; }
+  .b-stat strong { display: block; font: 600 34px/1.05 var(--serif); color: var(--accent); }
+  .b-stat span { display: block; margin-top: 4px; font-size: 13px; color: var(--soft); }
+  .b-visual.steps ol { display: flex; gap: 4mm; list-style: none; margin: 0; padding: 0; }
+  .b-visual.steps li { position: relative; flex: 1; padding: 4mm; background: var(--paper); border-radius: 8px; }
+  .b-visual.steps li:not(:last-child)::after { content: ""; position: absolute; right: -3.2mm; top: 50%; width: 2.4mm; height: 2.4mm;
+      border-top: 2px solid var(--accent); border-right: 2px solid var(--accent); transform: translateY(-50%) rotate(45deg); }
+  .b-step { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent);
+            color: #fff; font: 700 12px/1 var(--sans); }
+  .b-visual.steps p { margin: 6px 0 0; font-size: 13px; line-height: 1.4; }
+  .b-visual.compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(40mm, 1fr)); gap: 5mm; }
+  .b-col { padding: 4mm; background: var(--paper); border-radius: 8px; border-top: 3px solid var(--accent-2); }
+  .b-col h3 { margin: 0 0 6px; font: 600 16px/1.25 var(--serif); }
+  .b-col ul { margin: 0; padding-left: 16px; font-size: 13px; line-height: 1.45; }
+  .b-vtitle { margin: 0 0 4mm; font: 600 16px/1.25 var(--serif); }
+  .b-bar-row { display: grid; grid-template-columns: 34mm 1fr auto; align-items: center; gap: 4mm; margin: 0 0 3mm; font-size: 13px; }
+  .b-bar-label { color: var(--soft); }
+  .b-bar-track { height: 12px; border-radius: 6px; background: color-mix(in srgb, var(--accent-2) 16%, var(--paper)); overflow: hidden; }
+  .b-bar-fill { display: block; height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .b-bar-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .b-closing { display: flex; flex-direction: column; }
+  .b-closing .b-takeaways { margin: 0 0 12mm; }
+  .b-closing .b-takeaways li p { font: 15px/1.45 var(--serif); }
+  .b-colophon { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 12px; color: var(--muted); letter-spacing: .04em; }
+
+  @page { size: A4; margin: 12mm 12mm 14mm;
+          @bottom-right { content: counter(page); font: 12px -apple-system, sans-serif; color: #7d7369; }
+          @bottom-left { content: "Ghost · Reel"; font: 12px -apple-system, sans-serif; color: #7d7369; letter-spacing: .1em; } }
+  @page :first { margin: 0; @bottom-right { content: none; } @bottom-left { content: none; } }
+  @media print {
+    body.booking { background: #fff; }
+    .b-bar { display: none !important; }
+    .b-book { --paper: #fff; }
+    .b-book > section { width: auto; margin: 0; padding: 0; box-shadow: none; background: none; break-before: page; }
+    .b-book > section.b-cover { width: 210mm; height: 297mm; break-before: auto; padding: 16mm 16mm 20mm !important;
+                                background: radial-gradient(110% 50% at 100% 0%, var(--tint) 0%, transparent 60%), #fbf8f3 !important; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reel</h1>
+  <span class="count" id="count"></span>
+  <button id="makePdf" class="primary">Make PDF</button>
+  <button id="clear">Clear the reel</button>
+</header>
+<main id="reel"></main>
+<div id="book"></div>
+<script src="reel_store.js"></script>
+<script src="reel.js"></script>
+<script src="reel_book.js"></script>
+</body>
+</html>

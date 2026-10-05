@@ -1,0 +1,24 @@
+#!/bin/bash
+# Runs as root after the files are copied. Opens the setup page for the person at the Mac.
+GHOST="/Library/Application Support/Ghost"
+USER_NAME="$(stat -f%Su /dev/console)"
+[ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] && exit 0
+USER_ID="$(id -u "$USER_NAME")"
+as_user() { launchctl asuser "$USER_ID" sudo -u "$USER_NAME" "$@"; }
+
+# Programs from an older install would keep running old code; Chrome starts the new ones.
+pkill -f "$GHOST/app/ghost_cli.py" 2>/dev/null || true
+
+# Mia answers with the person's Claude account. Install the pinned, SHA-verified
+# Anthropic binary as that person; sign-in happens later in Mia's panel.
+as_user "$GHOST/python/bin/python3" "$GHOST/app/claude_setup.py" install \
+  >> "/private/tmp/ghost-install-claude.log" 2>&1 || true
+
+# The store version installs itself; otherwise show how to load the extension.
+if ls "/Library/Application Support/Google/Chrome/External Extensions/"*.json >/dev/null 2>&1; then
+  exit 0
+fi
+printf %s "$GHOST/app/extension" | as_user pbcopy
+GUIDE="file://${GHOST// /%20}/app/extension/install-guide.html"
+as_user open -a "Google Chrome" "$GUIDE" 2>/dev/null || as_user open "$GUIDE"
+exit 0

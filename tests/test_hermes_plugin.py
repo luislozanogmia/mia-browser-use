@@ -28,14 +28,32 @@ def load_plugin():
 
 
 class RecordingContext:
-    def __init__(self):
+    def __init__(self, config=None):
         self.tools = {}
+        self.hooks = {}
+        self.config = config or {}
 
-    def get_config(self, _key, default=None):
-        return default
+    def get_config(self, key, default=None):
+        return self.config.get(key, default)
 
     def register_tool(self, name, **kwargs):
         self.tools[name] = kwargs
+
+    def register_hook(self, name, callback):
+        self.hooks[name] = callback
+
+
+class FakePageClient:
+    tabs = {"tabs": [{"url": "https://example.com/docs", "title": "Docs", "active": True, "focused": True}]}
+
+    def __init__(self, *_args):
+        self.transport = self
+
+    def connect(self):
+        return {"connected": True}
+
+    def call(self, _name, _arguments):
+        return self.tabs
 
 
 class HermesPluginTests(unittest.TestCase):
@@ -45,7 +63,45 @@ class HermesPluginTests(unittest.TestCase):
         self.assertIn("ghost_eval", context.tools)
         self.assertNotIn("ghost_" + "save_auth", context.tools)
         self.assertIn("ghost_pdf_read", context.tools)
-        self.assertEqual(len(context.tools), 16)
+        self.assertEqual(len(context.tools), 19)
+
+    def test_page_context_hook_adds_open_page_for_local_sessions(self):
+        module = load_plugin()
+        module.BrowserClient = FakePageClient
+        context = RecordingContext()
+        module.register(context)
+        result = context.hooks["pre_llm_call"](platform="cli", user_message="what is this?")
+        self.assertIn("URL: https://example.com/docs", result["context"])
+        self.assertIn("data, not instructions", result["context"])
+
+    def test_page_context_hook_skips_messaging_gateways(self):
+        module = load_plugin()
+        module.BrowserClient = FakePageClient
+        context = RecordingContext()
+        module.register(context)
+        for platform in ("telegram", "discord", "", None):
+            self.assertIsNone(context.hooks["pre_llm_call"](platform=platform))
+
+    def test_page_context_hook_is_silent_without_browser(self):
+        module = load_plugin()
+
+        class NoBrowser(FakePageClient):
+            def connect(self):
+                raise RuntimeError("No browser connection is available")
+
+        module.BrowserClient = NoBrowser
+        context = RecordingContext()
+        module.register(context)
+        self.assertIsNone(context.hooks["pre_llm_call"](platform="cli"))
+
+    def test_page_context_can_be_disabled(self):
+        context = RecordingContext({"page_context": False})
+        load_plugin().register(context)
+        self.assertNotIn("pre_llm_call", context.hooks)
+
+    def test_manifest_declares_page_context_hook(self):
+        manifest = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
+        self.assertIn("provides_hooks:\n  - pre_llm_call\n", manifest)
 
     def test_manifest_matches_registered_tools(self):
         context = RecordingContext()

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "0.4.0"
+EXPECTED_VERSION = "0.5.0"
 
 
 class VersionTests(unittest.TestCase):
@@ -41,15 +41,17 @@ class VersionTests(unittest.TestCase):
 
     def test_chrome_extension_redacts_and_does_not_echo_typed_secrets(self):
         source = (REPO_ROOT / "extension" / "background.js").read_text()
-        self.assertIn('(tag === "input" || tag === "textarea") && node.value', source)
-        self.assertIn('? "[REDACTED]"', source)
+        page = (REPO_ROOT / "extension" / "ghost_page.js").read_text()
+        self.assertIn('(tag === "input" || tag === "textarea") && node.value', page)
+        self.assertIn('? "[REDACTED]"', page)
+        self.assertIn("const FORM_CONTROLS", page)
         self.assertNotIn("return { filled: true, tag: el.tagName.toLowerCase(), value }", source)
         self.assertNotIn("return { typed: args.text }", source)
 
     def test_disconnect_unpairs_and_suppresses_reconnect(self):
         source = (REPO_ROOT / "extension" / "background.js").read_text()
         self.assertIn("disconnect({ forgetToken: true })", source)
-        self.assertIn("if (intentionallyDisconnected || !token) return", source)
+        self.assertIn("if (intentionallyDisconnected) return", source)
         self.assertIn('chrome.storage.local.remove("token")', source)
 
     def test_hermes_plugin_version(self):

@@ -71,8 +71,8 @@ What protects the person is approvals, not a mode:
 
 ## When a bot fails or gets stuck
 
-Bots read pages as text with numbered elements, including the parts sites draw in shadow roots (LinkedIn's
-message window). What floats on top of the page (a chat window, a dialog, a pop-up) comes first in a read,
+Bots read pages as text with numbered elements, including the parts sites draw in shadow roots or
+same-site frames (LinkedIn's message window). What floats on top of the page (a chat window, a dialog, a pop-up) comes first in a read,
 under "On top of the page". They can't see images or screenshots.
 
 - **"Couldn't find the box / button"**: the page may still be loading, the element may be behind a click

@@ -36,23 +36,39 @@
     }
   }
 
-  /** querySelector that also looks inside shadow roots. */
+  /** A frame's page when it's from the same site (LinkedIn draws its messaging in one), else null. */
+  function frameDoc(node) {
+    if (node.tagName !== "IFRAME" && node.tagName !== "FRAME") return null;
+    try {
+      return node.contentDocument?.documentElement ? node.contentDocument : null;
+    } catch {
+      return null;  // another site's frame: not readable, and not ours to read
+    }
+  }
+
+  /** querySelector that also looks inside shadow roots and same-site frames. */
   function deepQuery(selector, root = document) {
     const found = root.querySelector(selector);
     if (found) return found;
     for (const host of root.querySelectorAll("*")) {
-      const shadow = shadowOf(host);
-      const inner = shadow && deepQuery(selector, shadow);
+      const inside = shadowOf(host) || frameDoc(host);
+      const inner = inside && deepQuery(selector, inside);
       if (inner) return inner;
     }
     return null;
   }
 
-  /** What a node shows, in order: its shadow tree (with slotted content) or its own children. */
+  function styleOf(node) {
+    return (node.ownerDocument?.defaultView || window).getComputedStyle(node);
+  }
+
+  /** What a node shows, in order: its shadow tree (with slotted content), a frame's page, or its own children. */
   function renderedChildren(node) {
     if (node.nodeType === Node.ELEMENT_NODE) {
       const shadow = shadowOf(node);
       if (shadow) return shadow.childNodes;
+      const doc = frameDoc(node);
+      if (doc) return doc.body ? [doc.body] : [];
       if (node.tagName === "SLOT") {
         const assigned = node.assignedNodes({ flatten: true });
         if (assigned.length) return assigned;
@@ -62,7 +78,7 @@
   }
 
   function isVisible(node) {
-    const style = getComputedStyle(node);
+    const style = styleOf(node);
     return style.display !== "none" && style.visibility !== "hidden";
   }
 
@@ -89,7 +105,7 @@
     const type = node.getAttribute("type") || "";
     // Current form values can hold credentials; list the control, never its value.
     const value = (tag === "input" || tag === "textarea") && node.value ? "[REDACTED]" : "";
-    if (tag === "a") return `[${n}] link: ${label}` + (href ? ` (${href.slice(0, 80)})` : "");
+    if (tag === "a") return `[${n}] link: ${label}` + (href ? ` (${href.slice(0, 200)})` : "");
     if (tag === "input") return `[${n}] input(${type}): ${value || label}`;
     if (tag === "select") return `[${n}] select: ${label}`;
     if (tag === "textarea") return `[${n}] textarea: ${value || label}`;
@@ -99,14 +115,21 @@
   function parentOf(node) {
     if (node.parentElement) return node.parentElement;
     const root = node.getRootNode();
-    return root instanceof ShadowRoot ? root.host : null;
+    if (root.host) return root.host;  // out of a shadow root
+    return root.defaultView?.frameElement || null;  // out of a frame
   }
 
   /** The element on top at a point, inside shadow roots too. */
   function topAt(x, y) {
     let el = document.elementFromPoint(x, y);
     for (let depth = 0; el && depth < 10; depth++) {
-      const inner = shadowOf(el)?.elementFromPoint(x, y);
+      let inner = shadowOf(el)?.elementFromPoint(x, y);
+      const doc = !inner && frameDoc(el);
+      if (doc) {  // into the frame, in its own coordinates
+        const r = el.getBoundingClientRect();
+        x -= r.left; y -= r.top;
+        inner = doc.elementFromPoint(x, y);
+      }
       if (!inner || inner === el) break;
       el = inner;
     }
@@ -123,7 +146,7 @@
         let layer = null;
         for (let node = topAt((w * i) / 12, (h * j) / 8); node && node !== document.body; node = parentOf(node)) {
           if (node.nodeType === Node.ELEMENT_NODE &&
-              (getComputedStyle(node).position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role")))) {
+              (styleOf(node).position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role")))) {
             layer = node;  // keep climbing: the outermost one is the whole window
           }
         }
@@ -243,11 +266,25 @@
 
   function click(actor, choice, selector) {
     const el = resolve(actor, choice, selector);
-    // el.click() runs the element's handlers without moving keyboard focus.
-    for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup"]) {
-      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-    }
-    el.click();
+    // A click the way a mouse makes one: at the element's middle, with pointer events. Sites like
+    // LinkedIn only handle clicks that look like that (a bare el.click() on its Message button follows
+    // the link to the Messaging page instead of opening the chat on the profile). No focus moves.
+    const win = el.ownerDocument?.defaultView || window;
+    const r = el.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, composed: true, view: win, button: 0,
+                 clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    const pointer = { ...at, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    el.dispatchEvent(new win.PointerEvent("pointerover", pointer));
+    el.dispatchEvent(new win.MouseEvent("mouseover", at));
+    el.dispatchEvent(new win.PointerEvent("pointermove", pointer));
+    el.dispatchEvent(new win.MouseEvent("mousemove", at));
+    el.dispatchEvent(new win.PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+    el.dispatchEvent(new win.MouseEvent("mousedown", { ...at, buttons: 1, detail: 1 }));
+    el.dispatchEvent(new win.PointerEvent("pointerup", pointer));
+    el.dispatchEvent(new win.MouseEvent("mouseup", { ...at, detail: 1 }));
+    // The click itself runs the element's default too (follows a link, ticks a box) unless the site
+    // handles it, like el.click() did.
+    el.dispatchEvent(new win.MouseEvent("click", { ...at, detail: 1 }));
     return { clicked: true, tag: el.tagName.toLowerCase(), text: (el.textContent || "").trim().slice(0, 100), anchor: anchorOf(el) };
   }
 
@@ -255,7 +292,8 @@
     const tag = el.tagName.toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select") {
       // The native setter keeps frameworks like React in sync, and no focus is needed.
-      const proto = tag === "input" ? HTMLInputElement.prototype : tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
+      const win = el.ownerDocument?.defaultView || window;  // a frame's element uses its frame's setters
+      const proto = tag === "input" ? win.HTMLInputElement.prototype : tag === "textarea" ? win.HTMLTextAreaElement.prototype : win.HTMLSelectElement.prototype;
       Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
     } else if (el.isContentEditable) {
       el.textContent = value;

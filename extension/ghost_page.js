@@ -3,7 +3,8 @@
  *
  * Each actor (bot or human) gets its own numbered element list per page, so
  * one bot's read never renumbers another bot's elements. Edits are
- * focus-free: they never move the human's keyboard focus or text cursor.
+ * focus-free: they never keep the human's keyboard focus or text cursor (a rich editor
+ * gets focus only while text goes in, then it goes back).
  *
  * The Chrome extension injects this file into its isolated world, and the Mia
  * in-app browser can run it in the page. It keeps no state outside the page.
@@ -322,12 +323,44 @@
       const proto = tag === "input" ? win.HTMLInputElement.prototype : tag === "textarea" ? win.HTMLTextAreaElement.prototype : win.HTMLSelectElement.prototype;
       Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
     } else if (el.isContentEditable) {
-      el.textContent = value;
+      typeIntoEditor(el, value);
+      return;  // the editor sent its own input events
     } else {
       fail("NOT_EDITABLE", `<${tag}> is not an input, textarea, select or editable element`);
     }
     el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText" }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  /** Rich editors (LinkedIn's message box, Gmail, Slack) keep their own model of the text and only see
+   * what comes through the browser's text input: replacing the element's text left LinkedIn's
+   * placeholder drawn over it and Send off. Insert it the way typing or pasting does, then hand the
+   * keyboard back to wherever it was. */
+  function typeIntoEditor(el, value) {
+    const doc = el.ownerDocument, win = doc.defaultView;
+    const before = doc.activeElement;
+    el.focus({ preventScroll: true });
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    const selection = win.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const typed = doc.execCommand("insertText", false, value);
+    if (!typed || !el.textContent.includes(value.split("\n")[0].slice(0, 20))) {
+      // No text input here: one paragraph per line, as editors keep them.
+      el.replaceChildren(...value.split("\n").map(line => {
+        const p = doc.createElement("p");
+        if (line) p.textContent = line; else p.append(doc.createElement("br"));
+        return p;
+      }));
+      el.dispatchEvent(new win.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    }
+    selection.removeAllRanges();
+    if (before && before !== el && before !== doc.body && typeof before.focus === "function") {
+      before.focus({ preventScroll: true });
+    } else {
+      el.blur();
+    }
   }
 
   function fill(actor, choice, selector, value) {

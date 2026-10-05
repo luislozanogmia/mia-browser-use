@@ -70,8 +70,9 @@ def clean_step(step: Any, loop: bool = False) -> dict | None:
         out["text"] = text
     if do == "open":
         url = _text(step.get("url"), 1000)
-        if loop and VAR.fullmatch(url) and VAR.fullmatch(url)[1] == "link":
-            return {"do": do, "url": "{{link}}"}
+        var = VAR.fullmatch(url)
+        if var:  # {{link}} in a loop, or a page the person gives before Play (an input)
+            return {"do": do, "url": f"{{{{{var[1]}}}}}"} if loop or var[1] != "link" else None
         return {"do": do, "url": url} if re.match(r"^https?://", url) else None
     if do in TARGETED and not (css or text):
         return None
@@ -124,6 +125,7 @@ def clean(data: Any) -> dict:
         raise ValueError("it has no steps it can run")
     if steps[0]["do"] != "open" or steps[0]["url"] == "{{link}}":
         raise ValueError("the first step must open a page")
+    # A page the person gives before Play is an input; {{link}} is the loop's item.
     if each and not links:
         raise ValueError("a repeating automation needs the text its links contain")
     if links and len(steps) < 2:
@@ -134,7 +136,8 @@ def clean(data: Any) -> dict:
         if NAME.fullmatch(key) and key not in {i["name"] for i in inputs} and key != "link":
             inputs.append({"name": key, "label": _text(item.get("label"), 60) or key.replace("_", " ").capitalize()})
     known = {s["as"] for s in steps if s["do"] == "copy"} | {i["name"] for i in inputs} | ({"link"} if links else set())
-    used = {m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])}
+    used = ({m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])}
+            | {m for s in steps if s["do"] == "open" for m in VAR.findall(s["url"])})
     missing = sorted(used - known)
     if missing:
         raise ValueError(f"it uses {{{{{missing[0]}}}}} without copying it first or asking for it")
@@ -150,7 +153,9 @@ def describe_step(step: dict) -> str:
     target = f"“{step['text']}”" if step.get("text") else "the element at " + step.get("css", "")
     do = step["do"]
     if do == "open":
-        return "Open the link" if step["url"] == "{{link}}" else f"Open {step['url']}"
+        if step["url"] == "{{link}}":
+            return "Open the link"
+        return f"Open the page in {step['url']}" if VAR.fullmatch(step["url"]) else f"Open {step['url']}"
     if do == "click":
         return f"Click {target}"
     if do == "type":

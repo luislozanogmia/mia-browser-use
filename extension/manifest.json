@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mia",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Mia, your browser assistant: she and her bots read, compare and act on your tabs with you.",
   "permissions": [
     "tabs",

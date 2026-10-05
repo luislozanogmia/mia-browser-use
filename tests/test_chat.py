@@ -125,6 +125,11 @@ def test_do_waits_for_approval_before_a_risky_click():
         assert "ghost_click" not in [c for c, _ in browser.actions()]
         await hub.handle({"action": "approve", "task": task.id})
         await settle(hub)
+        # Mia posts her answer just after the task finishes; give a busy machine time to get there.
+        for _ in range(500):
+            if hub.messages and hub.messages[-1]["text"] == "Mia: Sent.":
+                break
+            await asyncio.sleep(0.01)
         clicks = [a for c, a in browser.actions() if c == "ghost_click"]
         assert clicks == [{"choice": 1, "tab_id": 5, "actor_id": "mia-1", "human_ok": True}]
         assert task.status == "done" and hub.messages[-1]["text"] == "Mia: Sent."

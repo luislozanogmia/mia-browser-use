@@ -13,7 +13,9 @@ def test_both_skills_are_listed_with_where_they_are_and_what_they_are_for():
     for skill in skills.values():
         assert skill["path"].endswith("/SKILL.md") and len(skill["description"]) > 60
     index = mia_skills.prompt_index()
-    assert "building-automations" in index and skills["managing-bots"]["path"] in index and "load_skills" in index
+    assert skills["managing-bots"]["path"] in index and "load_skills" in index
+    # The builders' skill: they always get it, so it isn't in Mia's list.
+    assert skills["building-automations"]["audience"] == "builder" and "building-automations" not in index
 
 
 def test_a_skill_loads_without_its_frontmatter_and_unknown_names_load_nothing():
@@ -24,7 +26,7 @@ def test_a_skill_loads_without_its_frontmatter_and_unknown_names_load_nothing():
 
 def test_mia_reads_the_skill_she_asks_for_then_plans():
     plan = {"reply": "Recording it once.", "tasks": []}
-    session = FakeSession([{"load_skills": ["building-automations", "made-up"]}, plan])
+    session = FakeSession([{"load_skills": ["managing-bots", "made-up"]}, plan])
     systems = []
 
     def make(model, system, effort):
@@ -42,7 +44,7 @@ def test_mia_reads_the_skill_she_asks_for_then_plans():
         answer = await hub._plan_with_claude("m", "make an automation")
         assert json.loads(answer) == plan
         assert "Skills:" in systems[0] and "managing-bots" in systems[0]
-        assert "# Building Play Automations" in session.prompts[1] and "made-up" not in session.prompts[1]
+        assert "# Managing Mia's bots" in session.prompts[1] and "made-up" not in session.prompts[1]
         assert session.closed
     asyncio.run(main())
 
@@ -53,20 +55,18 @@ def test_a_plan_without_a_skill_request_is_used_as_it_is():
     assert ghost_chat.skill_request("not json") == []
 
 
-def test_making_an_automation_reusable_comes_with_the_skill():
-    systems = []
+def test_every_script_in_the_building_skill_is_one_play_can_run():
+    """The skill teaches by example, so each example must pass the same checks a saved script does."""
+    import re
 
-    def make(model, system, effort):
-        systems.append(system)
-        return FakeSession(['{"name": "x"}'])
+    import automations
 
-    async def push(state):
-        pass
-
-    async def browser(tool, args):
-        return True, {}
-
-    async def main():
-        await ChatHub(browser, push, session=make)._compose_with_claude("m", "steps")
-        assert systems[0].startswith(ghost_chat.AUTOMATION_PROMPT) and "# Building Play Automations" in systems[0]
-    asyncio.run(main())
+    text = mia_skills.load("building-automations")
+    blocks = re.findall(r"```json\n(.*?)```", text, re.S)
+    assert blocks
+    for block in blocks:
+        item = automations.clean(json.loads(block))
+        assert item["steps"][0]["do"] == "open"
+    # And every step form in its table is one Play knows.
+    forms = re.findall(r'`\{"do": "([a-z]+)"', text)
+    assert set(forms) == automations.ACTIONS

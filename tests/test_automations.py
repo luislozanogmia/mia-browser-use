@@ -9,7 +9,7 @@ import automations
 import ghost_chat
 from automations import AutomationStore, clean
 from ghost_chat import ChatHub, element_label, match_element
-from tests.test_chat import FakeSession, make_hub, send
+from tests.test_chat import FakeSession, MiaAnswers, make_hub, send
 
 PAGE = ("Report\n[0] link: Home (/)\n[1] input(text): Search reports\n[2] button: Export\n"
         "[3] button: Send report\n[4] input(password): Password\nTotal: 42")
@@ -220,66 +220,6 @@ def test_panel_runs_pauses_and_deletes_automations():
     asyncio.run(main())
 
 
-# -- teaching: Mia does it once, and what she did becomes the script ------------------
-
-def test_a_save_as_task_records_its_steps_and_saves_them():
-    async def main():
-        hub, browser, states, sessions = make_hub([[
-            {"tool": "ghost_read", "args": {}},
-            {"tool": "ghost_fill", "args": {"choice": 0, "value": "weekly"}},
-            {"tool": "ghost_click", "args": {"choice": 3}},
-            {"done": "Opened the next page."},
-        ]], plan={"reply": "I'll do it once and save it.", "tasks": [{
-            "title": "Next page", "goal": "Search weekly, then go to the next page", "url": "", "kind": "ask",
-            "save_as": {"name": "Weekly next", "schedule": {"kind": "daily", "at": "08:30"}}}]})
-        await hub.handle(send("make an automation that searches weekly and opens the next page"))
-        task = next(iter(hub.tasks.values()))
-        for _ in range(100):
-            if task.status == "needs_you":
-                await hub.handle({"action": "approve", "task": task.id})
-            if task.job.done():
-                break
-            await asyncio.sleep(0.01)
-        assert task.kind == "do" and task.status == "done", task.result
-        saved = hub.scripts.find("Weekly next")
-        assert saved["schedule"] == {"kind": "daily", "at": "08:30"}
-        assert saved["steps"] == [
-            {"do": "open", "url": "https://mail.example/"},
-            {"do": "type", "text": "Home", "value": "weekly"},
-            {"do": "click", "text": "Next page"},
-        ]
-        assert any(m["text"].startswith("Saved “Weekly next” as a Play Automation: 3 steps, every day at 08:30")
-                   for m in hub.messages)
-    asyncio.run(main())
-
-
-def test_mia_can_save_and_run_an_automation_from_the_chat():
-    async def main():
-        hub, browser, states, sessions = make_hub([], plan={"reply": "Saved.", "tasks": [], "automation": SCRIPT})
-        await hub.handle(send("save that as an automation"))
-        assert hub.scripts.find("Daily report")
-        assert "Saved “Daily report”" in hub.messages[-1]["text"]
-
-        async def planner(model, prompt):
-            assert "Saved Play Automations:\n- Daily report: Exports the report" in prompt
-            return json.dumps({"reply": "Running it.", "tasks": [], "run_automation": "daily report"})
-        hub.plan_run = planner
-        await hub.handle(send("run my daily report"))
-        task = next(t for t in hub.tasks.values() if t.kind == "play")
-        assert task.automation == hub.scripts.find("Daily report")["id"]
-        task.job.cancel()
-    asyncio.run(main())
-
-
-def test_a_bad_script_from_mia_is_explained_not_saved():
-    async def main():
-        hub, *_ = make_hub([], plan={"reply": "", "tasks": [], "automation": {"name": "X", "steps": [
-            {"do": "click", "text": "Go"}]}})
-        await hub.handle(send("save it"))
-        assert not hub.scripts.list()
-        assert "first step must open a page" in hub.messages[-1]["text"]
-    asyncio.run(main())
-
 
 # -- going through a list, with the person's own text --------------------------------
 
@@ -404,73 +344,11 @@ def test_clean_checks_loops_and_inputs():
     assert "{{link}}" not in str(clean({**LOOP, "each": None})["steps"])  # without a loop, {{link}} can't be opened
 
 
-def test_a_recording_becomes_a_script_with_values_and_a_loop():
-    async def main():
-        hub, browser, states, sessions = make_hub([[
-            {"tool": "ghost_read", "args": {}},
-            {"tool": "ghost_fill", "args": {"choice": 0, "value": "Hi Ana"}},
-            {"done": "Typed the message."},
-        ]], plan={"reply": "Recording it.", "tasks": [{
-            "title": "Record", "goal": "Do it once", "kind": "do", "save_as": {"name": "1st connection message"}}]})
-        asked = []
-
-        async def compose(model, prompt):
-            asked.append(prompt)
-            return json.dumps({**LOOP, "name": "Something else"})
-        hub.compose = compose
-        await hub.handle(send("make a play automation that messages my connections"))
-        task = next(iter(hub.tasks.values()))
-        for _ in range(100):
-            if task.status == "needs_you":
-                await hub.handle({"action": "approve", "task": task.id})
-            if task.job.done():
-                break
-            await asyncio.sleep(0.01)
-        saved = hub.scripts.find("1st connection message")
-        assert saved and saved["each"]["links"] == "linkedin.com/in/" and saved["inputs"][0]["name"] == "template"
-        assert '"value": "Hi Ana"' in asked[0] and "messages my connections" in asked[0]
-    asyncio.run(main())
-
-
-def test_a_recording_mia_cannot_turn_into_a_script_is_saved_as_recorded():
-    async def main():
-        hub, *_ = make_hub([[{"tool": "ghost_read", "args": {}}, {"done": "Read it."}]], plan={
-            "reply": "Recording.", "tasks": [{"title": "R", "goal": "g", "kind": "do", "save_as": {"name": "Plain"}}]})
-
-        async def compose(model, prompt):
-            return "not json"
-        hub.compose = compose
-        await hub.handle(send("make an automation"))
-        task = next(iter(hub.tasks.values()))
-        await task.job
-        assert hub.scripts.find("Plain")["steps"] == [{"do": "open", "url": "https://mail.example/"}]
-    asyncio.run(main())
-
-
 def test_an_empty_plan_gets_a_reply_instead_of_silence():
     async def main():
         hub, *_ = make_hub([], plan={"reply": "", "tasks": []})
         await hub.handle(send("make a play automation"))
         assert hub.messages[-1]["who"] == "mia" and "send it again" in hub.messages[-1]["text"]
-    asyncio.run(main())
-
-
-def test_an_automation_mia_writes_herself_is_made_reusable_too():
-    async def main():
-        hub, *_ = make_hub([], plan={"reply": "Saved.", "tasks": [], "automation": {
-            "name": "1st connection message",
-            "steps": [{"do": "open", "url": "https://www.linkedin.com/in/alejandro-lozano/"},
-                      {"do": "type", "text": "Write a message", "value": "Hola Alejandro"}]}})
-        asked = []
-
-        async def compose(model, prompt):
-            asked.append(prompt)
-            return json.dumps(LOOP)
-        hub.compose = compose
-        await hub.handle(send("save that as an automation for all my connections"))
-        saved = hub.scripts.find("1st connection message")
-        assert "Hola Alejandro" in asked[0] and "all my connections" in asked[0]
-        assert saved["each"]["links"] == "linkedin.com/in/" and saved["inputs"][0]["name"] == "template"
     asyncio.run(main())
 
 
@@ -499,4 +377,145 @@ def test_the_list_page_can_be_a_link_the_person_gives_before_play(tmp_path):
         task = await hub.play(saved, {"template": "Hi", "list_url": "not a link"})
         await finish(task)
         assert task.status == "failed" and "needs a web address" in task.result
+    asyncio.run(main())
+
+
+# -- builder bots: they write the script, test it on the real pages, then save it -------
+
+def builder_hub(browser, scripts, plan, tmp_path=None):
+    made = []
+
+    def session(model, system, effort):
+        if system == ghost_chat.ANSWER_PROMPT:
+            return MiaAnswers()
+        made.append({"model": model, "system": system, "effort": effort, "session": FakeSession(scripts.pop(0))})
+        return made[-1]["session"]
+
+    async def planner(model, prompt):
+        return json.dumps(plan)
+
+    async def push(state):
+        pass
+
+    hub = ChatHub(browser, push, session=session, plan=planner,
+                  scripts=AutomationStore(tmp_path / "automations.json" if tmp_path else None))
+    hub.claude_status = lambda fresh=False: {"installed": True, "signed_in": True}
+    hub.made = made
+    return hub
+
+
+async def run_task(hub, task):
+    """Run it to the end, approving what it asks (the questions are kept in hub.asked)."""
+    hub.asked = getattr(hub, "asked", [])
+    for _ in range(300):
+        if task.job.done():
+            return
+        if task.status == "needs_you" and task.approval and not task.approval.done():
+            hub.asked.append(task.question)
+            await hub.handle({"action": "approve", "task": task.id})
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{task.id} still {task.status}: {task.note}")
+
+
+LOOP_SEND = {**LOOP, "steps": LOOP["steps"] + [{"do": "click", "text": "Send"}]}
+SEARCH = "https://www.linkedin.com/search/results/people/?network=F"
+
+
+def test_a_builder_bot_tests_its_script_on_the_real_pages_and_saves_only_what_passed(tmp_path):
+    async def main():
+        browser = ListBrowser()
+        hub = builder_hub(browser, [[
+            {"tool": "ghost_read", "args": {}},
+            {"done": "Messages each connection.", "automation": LOOP_SEND},  # not tested yet
+            {"tool": "test_automation", "args": {"automation": LOOP_SEND, "inputs": {"template": "Hi {{first_name}}"}}},
+            {"done": "Messages each connection; fill Message before Play.", "automation": LOOP_SEND},
+        ]], {"reply": "A builder bot is on it.", "tasks": [{
+            "title": "Build it", "kind": "build", "url": SEARCH,
+            "goal": "Message each 1st connection with the person's text, starting with their first name.",
+            "build": {"name": "1st connection message", "schedule": {"kind": "manual"}}}]}, tmp_path)
+        await hub.handle({**send("make an automation that messages my 1st connections"), "model": "claude-opus-5-5"})
+        task = next(iter(hub.tasks.values()))
+        await run_task(hub, task)
+        assert task.kind == "build" and task.status == "done", task.result
+        builder = hub.made[0]
+        assert builder["model"] == "claude-opus-5-5" and builder["effort"] == ghost_chat.BUILD_EFFORT
+        assert ghost_chat.BUILD_PROMPT in builder["system"] and "# Building Play Automations" in builder["system"]
+        prompts = builder["session"].prompts
+        assert "hasn't passed test_automation" in prompts[2]
+        test = prompts[3]
+        assert test.startswith("Result of test_automation:") and "Test passed: every step worked." in test
+        assert "The list page has 2 items with “linkedin.com/in/”" in test and "Next-page button “Next”: found" in test
+        assert "copied “Ana” as {{first_name}}" in test and "typed “Hi Ana”" in test
+        assert "skipped in this test: on a real run it asks the person first (Click “Send”?)" in test
+        # The test never pressed Send, nor asked about it: the only click was Message.
+        assert hub.asked == [f"Open {SEARCH}? This sends the address to that site."]
+        assert [a.get("choice") for c, a in browser.calls if c == "ghost_click"] == [1]
+        saved = hub.scripts.find("1st connection message")
+        assert saved["steps"][-1] == {"do": "click", "text": "Send"} and saved["inputs"][0]["name"] == "template"
+        assert any(m["text"].startswith("Saved “1st connection message” as a Play Automation") for m in hub.messages)
+    asyncio.run(main())
+
+
+def test_a_failed_test_shows_the_builder_what_is_on_the_page():
+    async def main():
+        broken = {**LOOP, "steps": LOOP["steps"][:3] + [{"do": "click", "text": "Send InMail"}]}
+        hub = builder_hub(ListBrowser(), [[
+            {"tool": "test_automation", "args": {"automation": broken, "inputs": {"template": "x"},
+                                                 "link": "https://www.linkedin.com/in/bo-chen"}},
+            {"fail": "The page has no such button."},
+        ]], {"reply": "", "tasks": [{"title": "B", "kind": "build", "url": SEARCH, "goal": "Build it",
+                                     "build": {"name": "Broken"}}]})
+        await hub.handle(send("make it"))
+        task = next(iter(hub.tasks.values()))
+        await run_task(hub, task)
+        test = hub.made[0]["session"].prompts[1]
+        assert "Testing the steps for one item: https://www.linkedin.com/in/bo-chen" in test
+        assert "copied “Bo” as {{first_name}}" in test
+        assert "4. Click “Send InMail”: FAILED, couldn't find it on the page" in test
+        assert "- button: Message" in test and "- h1: Bo Chen" in test
+        assert task.status == "failed" and not hub.scripts.list()
+    asyncio.run(main())
+
+
+def test_a_script_mia_drafts_goes_to_a_builder_instead_of_being_saved_untested():
+    async def main():
+        hub = builder_hub(PlayBrowser(), [[{"fail": "stop here"}]], {"reply": "", "tasks": [], "automation": SCRIPT})
+        await hub.handle(send("save that as an automation"))
+        task = next(iter(hub.tasks.values()))
+        await run_task(hub, task)
+        assert task.kind == "build" and task.build["name"] == "Daily report" and task.url == "https://reports.example/"
+        assert "Build this Play Automation, starting from this draft" in task.goal and "#export" in task.goal
+        assert not hub.scripts.list()
+    asyncio.run(main())
+
+
+def test_plans_from_before_builder_bots_still_build():
+    plan = ghost_chat.parse_plan(json.dumps({"tasks": [
+        {"title": "R", "goal": "Do it once", "kind": "do", "save_as": {"name": "Old"}},
+        {"title": "New one", "goal": "Build it", "kind": "build"}]}))
+    assert [(t["kind"], t["build"]) for t in plan["tasks"]] == [("build", {"name": "Old"}), ("build", {"name": "New one"})]
+
+
+def test_a_bot_uses_a_saved_automation_for_one_item_in_its_own_tab(tmp_path):
+    async def main():
+        browser = ListBrowser()
+        hub = builder_hub(browser, [[
+            {"tool": "use_automation", "args": {"name": "1st connection message", "inputs": {"template": "Hola {{first_name}}"},
+                                                "link": "https://www.linkedin.com/in/bo-chen"}},
+            {"done": "Typed the message for Bo."},
+        ]], {"reply": "", "tasks": [{"title": "Message Bo", "kind": "do",
+                                     "goal": "Use the Play Automation “1st connection message” for Bo Chen."}]}, tmp_path)
+        hub.scripts.add(clean(LOOP))
+        await hub.handle(send("message Bo with my automation", mode="do"))
+        task = next(iter(hub.tasks.values()))
+        await run_task(hub, task)
+        assert task.status == "done", task.result
+        used = hub.made[0]["session"].prompts[1]
+        assert used.startswith("Result of use_automation:") and "Ran “1st connection message” for https://www.linkedin.com/in/bo-chen." in used
+        assert 'Copied: {"first_name": "Bo"}' in used
+        assert [a["value"] for c, a in browser.calls if c == "ghost_fill"] == ["Hola Bo"]
+        # It ran in a tab of its own: the person's tab (5) was never touched.
+        assert not [c for c, a in browser.calls if a.get("tab_id") == 5 and c in {"ghost_navigate", "ghost_click", "ghost_fill"}]
+        assert "use_automation" in hub.made[0]["system"]
+        assert "inputs: template; repeats for each link with “linkedin.com/in/”" in hub.made[0]["session"].prompts[0]
     asyncio.run(main())

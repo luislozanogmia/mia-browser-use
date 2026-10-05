@@ -1,8 +1,9 @@
-"""Mia's skills: guides she reads when a job needs them, kept in mia_skills/<name>/SKILL.md.
+"""Mia's skills: guides read when a job needs them, kept in mia_skills/<name>/SKILL.md.
 
 Her planning prompt lists each skill's name, where it is and what it's for (index()). Her
 sessions have no tools to open files, so she asks for one by name ({"load_skills": [...]})
-and ChatHub sends her its text (load()) before she plans.
+and ChatHub sends her its text (load()) before she plans. A skill whose frontmatter says
+"audience: builder" is for builder bots, which always get it, so it isn't in her list.
 """
 
 from __future__ import annotations
@@ -40,7 +41,8 @@ def index() -> list[dict]:
             continue
         name = fields.get("name") or path.parent.name
         if NAME.match(name) and fields.get("description"):
-            skills.append({"name": name, "description": fields["description"], "path": str(path)})
+            skills.append({"name": name, "description": fields["description"], "path": str(path),
+                           "audience": fields.get("audience") or "mia"})
     return skills
 
 
@@ -57,7 +59,7 @@ def load(name: str) -> str:
 
 def prompt_index() -> str:
     """The skills section of Mia's planning prompt."""
-    skills = index()
+    skills = [s for s in index() if s["audience"] == "mia"]
     if not skills:
         return ""
     lines = "\n".join(f"- {s['name']} ({s['path']}): {s['description']}" for s in skills)

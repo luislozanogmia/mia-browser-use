@@ -1526,7 +1526,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   // Mia's side panel: what the person typed, approvals, stops.
   if (msg.type === "chat" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
-    chatFromPanel(msg).then(sendResponse, err => sendResponse({ ok: false, error: `Ghost couldn't send that: ${err?.message || err}` }));
+    chatFromPanel(msg).then(sendResponse, err => sendResponse({ ok: false, error: `Mia Browser couldn't send that: ${err?.message || err}` }));
     return true;
   }
   if (msg.type === "chat-last" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {

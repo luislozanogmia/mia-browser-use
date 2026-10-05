@@ -1422,7 +1422,7 @@ async function chatTab() {
 
 async function chatFromPanel(msg) {
   if (!CHAT_ACTIONS.has(msg.action)) return { ok: false, error: "Unknown action" };
-  if (!(connected && ws && ws.readyState === WebSocket.OPEN)) return { ok: false, error: "Mia isn't connected to the Ghost bridge" };
+  if (!(connected && ws && ws.readyState === WebSocket.OPEN)) return { ok: false, error: "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome" };
   const chat = { action: msg.action, task: typeof msg.task === "string" ? msg.task.slice(0, 32) : undefined,
                  agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
                  chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined };
@@ -1536,7 +1536,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // The reel page wants the words for its PDF: the bridge asks a model.
   if (msg.type === "reel-story" && sender.url?.startsWith(chrome.runtime.getURL("reel.html"))) {
     if (!(connected && ws && ws.readyState === WebSocket.OPEN)) {
-      sendResponse({ ok: false, error: "Ghost isn't connected to the bridge" });
+      sendResponse({ ok: false, error: "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome" });
       return false;
     }
     toBridge({ type: "reel_story", id: String(msg.id || "").slice(0, 32), moments: Array.isArray(msg.moments) ? msg.moments.slice(0, 200) : [], language });
@@ -1626,7 +1626,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       intentionallyDisconnected = false;
       pairAutomatically().then(ok => {
         if (ok) connect();
-        sendResponse(ok ? { ok: true } : { ok: false, error: "Couldn't start Ghost on this computer. Run ./install-extension.sh once, then try again." });
+        sendResponse(ok ? { ok: true } : { ok: false, error: "Couldn't start Mia Browser on this computer. Run the Mia Browser installer once, then try again." });
       });
       return true;
     }

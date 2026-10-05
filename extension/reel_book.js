@@ -68,7 +68,7 @@ function askStory(entries) {
     chrome.runtime.onMessage.addListener(listen);
     timer = setTimeout(() => done({ error: "The model took too long" }), STORY_WAIT_MS);
     chrome.runtime.sendMessage({ type: "reel-story", id, moments: momentsOf(entries) }, reply => {
-      if (!reply?.ok) done({ error: reply?.error || "Ghost isn't connected" });
+      if (!reply?.ok) done({ error: reply?.error || "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome" });
     });
   });
 }
@@ -98,7 +98,7 @@ function coverNode(entries, story) {
     : entries.find(e => e.kind === "answer" && e.image) || entries.find(e => e.image);
   const stat = (n, one, many) => el("div", {}, el("strong", { textContent: n }), el("span", { textContent: n === 1 ? one : many }));
   const cover = el("section", { className: "b-cover" },
-    el("div", { className: "b-brand" }, ghostMark(), el("span", { textContent: "Ghost · Reel" }),
+    el("div", { className: "b-brand" }, ghostMark(), el("span", { textContent: "Mia Browser · Reel" }),
       el("span", { className: "b-date", textContent: sameDay ? day(first) : `${day(first)} – ${day(last)}` })),
     el("h1", { className: "b-title", textContent: story.title }),
     story.subtitle ? el("p", { className: "b-subtitle", textContent: story.subtitle }) : "");
@@ -202,7 +202,7 @@ function bookNode(entries, story) {
         el("li", {}, el("span", { className: "b-n", textContent: pad2(i + 1) }), el("p", { textContent: t })))));
   }
   closing.append(el("p", { className: "b-colophon" }, ghostMark(),
-    el("span", { textContent: `Made with Ghost · ${new Date().toLocaleDateString([], { month: "long", day: "numeric", year: "numeric" })}` })));
+    el("span", { textContent: `Made with Mia Browser · ${new Date().toLocaleDateString([], { month: "long", day: "numeric", year: "numeric" })}` })));
   root.append(closing);
   return root;
 }
@@ -210,7 +210,7 @@ function bookNode(entries, story) {
 function closeBook() {
   document.body.classList.remove("booking");
   book.replaceChildren();
-  document.title = "Ghost reel";
+  document.title = "Mia Browser reel";
 }
 
 async function openBook(entries, story, note = "") {
@@ -232,7 +232,7 @@ async function openBook(entries, story, note = "") {
 makePdf.addEventListener("click", async () => {
   const entries = await reelAll();
   if (!entries.length) {
-    alert("The reel is empty. Turn on Reel mode in the Ghost menu and browse a shared page first.");
+    alert("The reel is empty. Turn on Reel mode in the Mia Browser menu and browse a shared page first.");
     return;
   }
   makePdf.disabled = true;

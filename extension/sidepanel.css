@@ -207,3 +207,6 @@ body.in-plays .claude-bar { display: none !important; }
 .play-actions button.run { background: #1D9E75; border-color: #1D9E75; color: #fff; }
 .play-actions button.del { margin-left: auto; color: var(--alert); }
 .play-actions button:disabled { opacity: .5; cursor: default; }
+.play-input { display: flex; flex-direction: column; gap: 4px; font-weight: 500; }
+.play-input textarea { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; background: var(--surface);
+  font-size: 13px; font-weight: 400; }

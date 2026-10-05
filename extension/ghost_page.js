@@ -26,6 +26,41 @@
     return actor;
   }
 
+  // Sites like LinkedIn draw parts of the page (its message window) inside shadow roots, which
+  // document.querySelector and childNodes don't reach. The extension can open closed ones too.
+  function shadowOf(node) {
+    try {
+      return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(node) || node.shadowRoot || null;
+    } catch {
+      return node.shadowRoot || null;
+    }
+  }
+
+  /** querySelector that also looks inside shadow roots. */
+  function deepQuery(selector, root = document) {
+    const found = root.querySelector(selector);
+    if (found) return found;
+    for (const host of root.querySelectorAll("*")) {
+      const shadow = shadowOf(host);
+      const inner = shadow && deepQuery(selector, shadow);
+      if (inner) return inner;
+    }
+    return null;
+  }
+
+  /** What a node shows, in order: its shadow tree (with slotted content) or its own children. */
+  function renderedChildren(node) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const shadow = shadowOf(node);
+      if (shadow) return shadow.childNodes;
+      if (node.tagName === "SLOT") {
+        const assigned = node.assignedNodes({ flatten: true });
+        if (assigned.length) return assigned;
+      }
+    }
+    return node.childNodes;
+  }
+
   function isVisible(node) {
     const style = getComputedStyle(node);
     return style.display !== "none" && style.visibility !== "hidden";
@@ -64,7 +99,7 @@
   /** Walk the page, number interactive elements for this actor, return text. */
   function enumerate(actor, maxChars, selector) {
     checkActor(actor);
-    const rootEl = selector ? document.querySelector(selector) : document.body;
+    const rootEl = selector ? deepQuery(selector) : document.body;
     if (!rootEl) fail("NOT_FOUND", `Selector "${selector}" not found`);
     const items = [];
     const elements = [];
@@ -92,7 +127,7 @@
         chars += line.length;
         if (!container) return;
       }
-      for (const child of node.childNodes) {
+      for (const child of renderedChildren(node)) {
         if (chars >= maxChars) break;
         walk(child);
       }
@@ -107,7 +142,7 @@
   /** Find the element an actor means: its own number, or a selector. */
   function resolve(actor, choice, selector) {
     if (typeof selector === "string" && selector) {
-      const el = document.querySelector(selector);
+      const el = deepQuery(selector);
       if (!el) fail("NOT_FOUND", `Selector not found: ${selector}`);
       return el;
     }
@@ -124,10 +159,12 @@
 
   /** A CSS path that another browser showing the same page can resolve. */
   function cssPath(el) {
-    if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) return `#${CSS.escape(el.id)}`;
+    // Inside a shadow root the path starts at that root; deepQuery finds it there again.
+    const scope = el.getRootNode();
+    if (el.id && scope.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) return `#${CSS.escape(el.id)}`;
     const parts = [];
     for (let node = el; node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement; node = node.parentElement) {
-      if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) {
+      if (node.id && scope.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) {
         parts.unshift(`#${CSS.escape(node.id)}`);
         break;
       }
@@ -198,5 +235,5 @@
     return anchorOf(el);
   }
 
-  globalThis.__ghostPage = { enumerate, resolve, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
+  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
 })();

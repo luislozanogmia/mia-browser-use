@@ -658,7 +658,10 @@ class BridgeServer:
         look = lambda a: {"name": str(a.get("name") or a.get("id", ""))[:40], "color": a.get("color", ""),
                           "kind": a.get("kind", "human")}
         return {"name": self.room.room, "connected": self.room.connected, "me": look(self.room.me),
-                "members": [look(a) for a in list(self.room.members.values())[:30]]}
+                "members": [look(a) for a in list(self.room.members.values())[:30]],
+                # Other people (not bots, not this person) who can see shared tabs: multiplayer.
+                "others": sum(1 for a in self.room.members.values()
+                              if a.get("kind", "human") != "bot" and not self.room._mine(a))}
 
     async def _extension_event(self, msg):
         """Things the extension tells the bridge without being asked."""

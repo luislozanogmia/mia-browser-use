@@ -68,7 +68,11 @@
       const shadow = shadowOf(node);
       if (shadow) return shadow.childNodes;
       const doc = frameDoc(node);
-      if (doc) return doc.body ? [doc.body] : [];
+      if (doc) {
+        // A frame kept behind the page (LinkedIn preloads a hidden copy of itself) isn't shown: skip it.
+        const r = node.getBoundingClientRect(), z = parseInt(styleOf(node).zIndex, 10);
+        return doc.body && r.width > 1 && r.height > 1 && !(z < 0) ? [doc.body] : [];
+      }
       if (node.tagName === "SLOT") {
         const assigned = node.assignedNodes({ flatten: true });
         if (assigned.length) return assigned;
@@ -140,22 +144,44 @@
    * top across the screen. Sites often add these at the end of the page, past where a read stops. */
   function layersOnTop() {
     const found = new Set();
+    const blocks = new Map();  // the page's top-level block under each point -> how often
+    const floating = new Set();  // blocks where what's under the point floats (fixed or absolute)
+    const tall = node => node.getBoundingClientRect().height >= 120;  // not a bar (a top menu, a minimized chat)
     const w = innerWidth, h = innerHeight;
     for (let i = 1; i < 12; i++) {
       for (let j = 1; j < 8; j++) {
-        let layer = null;
-        for (let node = topAt((w * i) / 12, (h * j) / 8); node && node !== document.body; node = parentOf(node)) {
-          if (node.nodeType === Node.ELEMENT_NODE &&
-              (styleOf(node).position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role")))) {
-            layer = node;  // keep climbing: the outermost one is the whole window
+        let fixed = null, lastTall = null, block = null, floats = false;
+        for (let node = topAt((w * i) / 12, (h * j) / 8); node && node !== document.body && node !== document.documentElement;
+             node = parentOf(node)) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (tall(node)) lastTall = node;
+          const position = styleOf(node).position;
+          if (position === "fixed" || position === "absolute") floats = true;
+          if (position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role"))) {
+            // The outermost one is the whole window; a short fixed holder stands for the tall box inside it.
+            fixed = tall(node) ? node : lastTall || fixed;
           }
+          if (node.parentElement === document.body) block = node;
         }
-        // Bars (a site's top menu, a minimized chat) are short; windows and dialogs are not.
-        if (layer && layer.getBoundingClientRect().height >= 120) found.add(layer);
+        if (fixed) found.add(fixed);
+        if (block) blocks.set(block, (blocks.get(block) || 0) + 1);
+        if (block && floats) floating.add(block);
       }
     }
+    // Windows, chats and dialogs are usually their own block next to the page's main one (LinkedIn's
+    // message window is): another block on screen whose part there floats is on top of the page.
+    // (A side menu that's just part of the layout doesn't float.)
+    const main = [...blocks].sort((a, b) => b[1] - a[1])[0]?.[0];
+    for (const block of floating) {
+      if (block !== main && tall(block)) found.add(block);
+    }
     // A layer inside another is read with it.
-    return [...found].filter(a => ![...found].some(b => b !== a && b.contains(a)));
+    return [...found].filter(a => a !== main && ![...found].some(b => b !== a && deepContains(b, a)));
+  }
+
+  function deepContains(outer, node) {
+    for (let n = node; n; n = parentOf(n)) if (n === outer) return true;
+    return false;
   }
 
   /** Walk the page, number interactive elements for this actor, return text. */

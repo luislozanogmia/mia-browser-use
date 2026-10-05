@@ -94,8 +94,8 @@ only then for its recorded **css**. It retries for a few seconds while the page 
   `#com\.linkedin\...refACoAA... > div > section > div:nth-of-type(2) > ...`: they contain one person's id and
   break on the next profile.
 - For a field, `text` is its label or placeholder.
-- Bots can see inside sites' shadow roots (LinkedIn draws its message window in one), so those elements
-  work like any other.
+- Bots can see inside sites' shadow roots and same-site frames (LinkedIn draws its message window in
+  one), so those elements work like any other.
 
 ### Values: what changes from run to run
 

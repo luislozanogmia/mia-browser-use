@@ -69,7 +69,7 @@ class BrowserClient:
         chrome = BridgeTransport()
         status = chrome.status()
         if not status.get("connected"):
-            raise RuntimeError(status.get("error", "Chrome extension bridge is unavailable"))
+            raise RuntimeError(status.get("error", "Mia is running, but the Chrome extension isn't connected. Open Chrome with the Mia extension."))
         self.backend = "chrome"
         self.transport = chrome
         return status

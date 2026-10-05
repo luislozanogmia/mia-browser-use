@@ -186,7 +186,7 @@ def load_bridge_token(*, create: bool = False) -> str:
             raise
     if not create:
         raise BridgeAuthError(
-            f"Bridge token not found at {path}. Start bridge_server.py once to create it."
+            f"Bridge token not found at {path}. Open Chrome with the Mia extension, or run `mia-browser-use up`, to create it."
         )
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

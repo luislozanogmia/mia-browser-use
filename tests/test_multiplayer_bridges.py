@@ -81,6 +81,9 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         for me, color, tab in (("luis", "#3b82f6", 11), ("ana", "#ef4444", 22)):
             link = RoomLink(url, "demo", KEY, {"id": me, "kind": "human", "name": me.title(), "color": color}, on_message=None)
             bridge = BridgeServer(token=TOKEN, room=link)
+            # Mia's own answer would start a real model, or fail at once without Claude Code and
+            # close the question before a test looks at it. These tests are about the room.
+            bridge.chat.explain = self._no_answer
             link.on_message = bridge.on_room_message
             ext = ScriptedExtension(bridge, tab)
             bridge.extension_ws = ext
@@ -95,6 +98,9 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
             await link.stop()
         self.server.close()
         await self.server.wait_closed()
+
+    async def _no_answer(self, *args, **kwargs):
+        return None
 
     async def _until(self, check, timeout=5):
         async def loop():

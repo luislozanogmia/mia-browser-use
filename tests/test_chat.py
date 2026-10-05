@@ -152,8 +152,10 @@ def test_rejected_action_never_runs():
 
 def test_parallel_tasks_get_their_own_tabs_and_never_eval():
     async def main():
+        # Bots start in any order and take these scripts in that order; two read, so a new tab is always read.
         scripts = [[{"tool": "ghost_eval", "args": {"script": "1"}}, {"done": "a"}],
-                   [{"tool": "ghost_read", "args": {"tab_id": 1, "actor_id": "x"}}, {"done": "b"}]]
+                   [{"tool": "ghost_read", "args": {"tab_id": 1, "actor_id": "x"}}, {"done": "b"}],
+                   [{"tool": "ghost_read", "args": {"tab_id": 1, "actor_id": "x"}}, {"done": "c"}]]
         hub, browser, _, sessions = make_hub(scripts, plan={"tasks": [
             {"title": "A", "goal": "do a", "url": "https://a.example/"},
             {"title": "B", "goal": "do b", "url": "https://b.example/"},
@@ -162,8 +164,9 @@ def test_parallel_tasks_get_their_own_tabs_and_never_eval():
         await settle(hub)
         commands = [c for c, _ in browser.actions()]
         assert "ghost_eval" not in commands and commands.count("ghost_tab_open") == 2
-        read = next(a for c, a in browser.actions() if c == "ghost_read")
-        assert read["tab_id"] == 77 and read["actor_id"].startswith("mia-") and read["human_ok"] is True
+        # The three bots run at once, so the bot on the current tab may read first: look at a new tab's read.
+        read = next(a for c, a in browser.actions() if c == "ghost_read" and a.get("tab_id") == 77)
+        assert read["actor_id"].startswith("mia-") and read["human_ok"] is True
         # The javascript: url was dropped, so that task works on the current tab instead.
         assert [t.own_tab for t in hub.tasks.values()] == [True, True, False]
     asyncio.run(main())
@@ -237,8 +240,7 @@ def test_one_agent_per_tab_holds_selection_and_chat_tasks():
         await hub.explain({"id": "a1", "question": "Explain this.", "text": "cats are great"}, 5, "https://www.pets.example/x")
         await hub.explain({"id": "a2", "question": "And dogs?", "text": "dogs"}, 5, "https://www.pets.example/x")
         await hub.explain({"id": "a3", "question": "Explain this.", "text": "other"}, 9, "https://other.example/")
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await settle(hub)  # the bots answer on a thread: wait for them, not for a number of ticks
         tasks = list(hub.tasks.values())
         assert tasks[0].agent is tasks[1].agent is not tasks[2].agent
         agent = tasks[0].agent
@@ -247,7 +249,8 @@ def test_one_agent_per_tab_holds_selection_and_chat_tasks():
         assert tasks[0].title == "Explain “cats are great…”" and tasks[1].title == "And dogs?"
         assert [t.status for t in tasks[:2]] == ["done", "done"]
         assert tasks[0].result == "Cats. They purr."
-        assert len(bots) == 2 and bots[0].calls == [("a1", 5), ("a2", 5)]  # one bot per agent, its tab
+        # One bot per agent, on its tab. Agents start their bots in either order.
+        assert len(bots) == 2 and sorted(b.calls for b in bots) == [[("a1", 5), ("a2", 5)], [("a3", 9)]]
         last = states[-1]
         assert [a["name"] for a in last["agents"]] == ["Pets bot", "Other bot"]
         assert {t["agent"] for t in last["tasks"]} == {"luis-mia-1", "luis-mia-2"}

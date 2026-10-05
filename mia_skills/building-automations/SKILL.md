@@ -74,7 +74,7 @@ The person fills Message before Play, for example `Hola {{first_name}}, estoy la
 
 | Step | Form | Notes |
 |---|---|---|
-| open | `{"do": "open", "url": "https://..."}` | Always the first step. In a loop, `{"do": "open", "url": "{{link}}"}` opens the current item. |
+| open | `{"do": "open", "url": "https://..."}` | Always the first step. `{"do": "open", "url": "{{list_url}}"}` opens a page the person gives in an input. In a loop, `{"do": "open", "url": "{{link}}"}` opens the current item. |
 | click | `{"do": "click", "text": "Message", "css": "..."}` | Text, css, or both. |
 | type | `{"do": "type", "text": "Write a message", "css": "...", "value": "..."}` | Replaces what's in the field. Values may use `{{name}}`. |
 | key | `{"do": "key", "key": "Enter", "text": optional}` | Enter, Tab, Escape, arrows. |
@@ -97,13 +97,27 @@ only then for its recorded **css**. It retries for a few seconds while the page 
 - Bots can see inside sites' shadow roots and same-site frames (LinkedIn draws its message window in
   one), so those elements work like any other.
 
+### Links in the request: test target, fixed start, or a box
+
+A link in the person's request is one of three things. Decide which before writing the first step:
+
+- **Where to try it** ("test it on https://linkedin.com/in/alejandro…", "do it on this profile"): only the
+  recording run goes there. Never put it in the script: the script goes through the list, not that person.
+- **A fixed starting page** they want every time ("my 1st connections"): the first step opens it.
+- **A page they'll choose each run** ("parse the LinkedIn URL I give it", "from a search link", "any list"):
+  an input, `{"name": "list_url", "label": "List page (link)"}`, and the first step is
+  `{"do": "open", "url": "{{list_url}}"}`. The person pastes the link before Play.
+
+When unsure between the last two, make it an input: a box is never wrong, a hardcoded page often is.
+
 ### Values: what changes from run to run
 
 Anything that would be different next time must not be written into a step:
 
 - **The item's own data** (the person's name, a company, a price): a `copy` step reads it from the page and
   saves it `as` a name; later values use `{{that_name}}`. For a first name, copy the profile heading with
-  `"words": 1`.
+  `"words": 1`. Give a copy step a css that finds the same spot on every item (`h1`) and no `text`: the text
+  recorded is one person's name, which isn't on the next profile.
 - **What the person wants to choose** (the message, a search term, an amount): an **input**, a text box in the
   panel they fill before Play. `{"name": "template", "label": "Message"}`, used as `{{template}}`. An input
   may itself contain copied values: the person writes `Hi {{first_name}}` in the box.

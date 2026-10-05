@@ -472,3 +472,31 @@ def test_an_automation_mia_writes_herself_is_made_reusable_too():
         assert "Hola Alejandro" in asked[0] and "all my connections" in asked[0]
         assert saved["each"]["links"] == "linkedin.com/in/" and saved["inputs"][0]["name"] == "template"
     asyncio.run(main())
+
+
+def test_the_list_page_can_be_a_link_the_person_gives_before_play(tmp_path):
+    script = {**LOOP, "inputs": LOOP["inputs"] + [{"name": "list_url", "label": "List page (link)"}],
+              "steps": [{"do": "open", "url": "{{list_url}}"}] + LOOP["steps"][1:]}
+    item = clean(script)
+    assert item["steps"][0] == {"do": "open", "url": "{{list_url}}"}
+    assert automations.describe_step(item["steps"][0]) == "Open the page in {{list_url}}"
+    with pytest.raises(ValueError, match="without copying it first or asking for it"):
+        clean({**script, "inputs": LOOP["inputs"]})
+    with pytest.raises(ValueError, match="first step must open a page"):
+        clean({**script, "steps": [{"do": "open", "url": "{{link}}"}] + LOOP["steps"][2:]})
+
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser, tmp_path)
+        saved = hub.scripts.add(item)
+        task = await hub.play(saved, {"template": "Hi {{first_name}}",
+                                      "list_url": "https://www.linkedin.com/search/results/people/?keywords=sales"})
+        await finish(task)
+        assert task.status == "done" and task.result == "Done for 3 links."
+        first = next(a for c, a in browser.calls if c == "ghost_tab_open")
+        assert first["url"] == "https://www.linkedin.com/search/results/people/?keywords=sales"
+
+        task = await hub.play(saved, {"template": "Hi", "list_url": "not a link"})
+        await finish(task)
+        assert task.status == "failed" and "needs a web address" in task.result
+    asyncio.run(main())

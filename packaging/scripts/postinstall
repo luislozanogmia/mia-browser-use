@@ -10,8 +10,9 @@ as_user() { launchctl asuser "$USER_ID" sudo -u "$USER_NAME" "$@"; }
 pkill -f "$GHOST/app/ghost_cli.py" 2>/dev/null || true
 
 # Mia answers with the person's Claude account: install Claude Code for them if it's
-# missing (Anthropic's official installer, into their home folder). Signing in
-# happens later from Mia's panel, with one button. A failure here never fails the install.
+# missing (Anthropic's official installer, into their home folder). An existing
+# install is used as it is. Signing in happens later from Mia's panel, with one
+# button. A failure here never fails the install.
 USER_HOME="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"
 if [ ! -x "$USER_HOME/.local/bin/claude" ] && ! as_user /bin/bash -lc 'command -v claude' >/dev/null 2>&1; then
   as_user /bin/bash -c 'set -o pipefail; /usr/bin/curl -fsSL https://claude.ai/install.sh | /bin/bash' \

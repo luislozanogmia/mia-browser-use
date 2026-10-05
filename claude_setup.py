@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -68,18 +67,9 @@ def install() -> bool:
     return binary() is not None
 
 
-def _in_terminal(claude: str) -> None:
-    """Fallback: a Terminal window that runs only the sign-in, for a CLI that wants one."""
-    script = Path(tempfile.mkdtemp(prefix="ghost-")) / "Sign in to Claude.command"
-    script.write_text(
-        "#!/bin/sh\nclear\necho 'Sign in to Claude in the browser window that opens.'\necho\n"
-        f"'{claude}' auth login --claudeai && echo && echo \"You're signed in. You can close this window.\"\n")
-    script.chmod(0o700)
-    subprocess.run(["/usr/bin/open", "-a", "Terminal", str(script)], check=False)
-
-
-def login() -> None:
-    """Start the browser sign-in for the person's Claude account."""
+def login() -> bool:
+    """Start the browser sign-in for the person's Claude account. False when it failed to start;
+    the panel then offers to try again (never a Terminal window)."""
     claude = binary()
     if not claude:
         raise RuntimeError("Claude Code isn't installed")
@@ -90,7 +80,6 @@ def login() -> None:
     try:
         code = proc.wait(LOGIN_WAIT_SECONDS)
     except subprocess.TimeoutExpired:
-        return  # waiting for the browser, as it should
+        return True  # waiting for the browser, as it should
     _cache["value"] = None
-    if code != 0:
-        _in_terminal(claude)
+    return code == 0

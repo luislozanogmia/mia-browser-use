@@ -651,7 +651,9 @@ class ChatHub:
             if not (await asyncio.to_thread(claude_setup.status, True))["signed_in"]:
                 self.claude_busy = "signing_in"
                 await self.publish()
-                await asyncio.to_thread(claude_setup.login)
+                if not await asyncio.to_thread(claude_setup.login):
+                    self.say("mia", "The Claude sign-in didn't open. Press “Sign in to Claude” to try again.")
+                    return
                 for _ in range(100):  # about five minutes to finish in the browser
                     await asyncio.sleep(3)
                     if (await asyncio.to_thread(claude_setup.status, True))["signed_in"]:

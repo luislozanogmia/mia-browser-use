@@ -57,16 +57,16 @@ class ClaudeSetupTests(unittest.TestCase):
         binary = fake_claude(self.tmp, {"loggedIn": False}, login_sleep=5)
         with mock.patch.object(claude_setup.shutil, "which", return_value=binary), \
              mock.patch.object(claude_setup, "LOGIN_WAIT_SECONDS", 0.5), \
-             mock.patch.object(claude_setup, "_in_terminal") as terminal:
-            claude_setup.login()
-        terminal.assert_not_called()
+             mock.patch.object(claude_setup.subprocess, "run") as run:
+            self.assertTrue(claude_setup.login())
+        run.assert_not_called()
 
-    def test_login_that_needs_a_terminal_gets_one(self):
+    def test_failed_login_reports_it_and_never_opens_terminal(self):
         binary = fake_claude(self.tmp, {"loggedIn": False}, login_exit=1)
         with mock.patch.object(claude_setup.shutil, "which", return_value=binary), \
-             mock.patch.object(claude_setup, "_in_terminal") as terminal:
-            claude_setup.login()
-        terminal.assert_called_once_with(binary)
+             mock.patch.object(claude_setup.subprocess, "run") as run:
+            self.assertFalse(claude_setup.login())
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

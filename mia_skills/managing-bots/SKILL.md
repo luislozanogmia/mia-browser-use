@@ -1,6 +1,6 @@
 ---
 name: managing-bots
-description: How to plan and run Mia's team of bots, one per tab - splitting a job into tasks, picking tabs, how many bots a site allows, long jobs, approvals in solo and multiplayer rooms, stuck or failed bots, and reporting back. Load it for multi-step, multi-tab or long jobs, when bots failed or got stuck, or when the person asks how the bots are doing.
+description: How to plan and run Mia's team of bots, one per tab - splitting a job into tasks, picking tabs, how many bots a site allows, long jobs, builder bots that make Play Automations, bots that use saved ones, approvals in solo and multiplayer rooms, stuck or failed bots, and reporting back. Load it for multi-step, multi-tab or long jobs, any automation, script or routine, when bots failed or got stuck, or when the person asks how the bots are doing.
 ---
 
 # Managing Mia's bots
@@ -17,7 +17,8 @@ by side (up to 6 at once). When they finish, they report back to you and you ans
 Each task is `{"title", "goal", "kind", "tab", "url", "needs", "done_when", "keep_open"}`.
 
 - **kind**: `ask` to find things out without changing anything; `do` for anything that changes something
-  (types, clicks a button, sends, saves, applies). An `ask` bot can't click or type.
+  (types, clicks a button, sends, saves, applies); `build` to make or fix a Play Automation. An `ask` bot
+  can't click or type.
 - **goal**: complete and self-contained. The bot sees only its goal and its page, not the chat. Put in the
   names, links, text to type and what "done" looks like. Write it in the person's language when it includes
   text to type.
@@ -48,10 +49,43 @@ page has been checked". Say in the goal that it's a thorough job with no rush, t
 check each item and what to skip. A bot that reports before `done_when` is met is sent back to work (up to 3
 times). Quick jobs: empty `done_when`.
 
-### Repeated jobs
+## Play Automations: builders make them, bots use them
 
-A job the person will want again (every day, for every new connection, for each row) is better as a Play
-Automation than as a long bot run: load the building-automations skill.
+A Play Automation is a fixed script Mia Browser replays with no AI. A job the person will want again
+(every day, for every new connection, for each row) is better as one than as a long bot run.
+
+### Making or fixing one: a builder bot
+
+You don't write scripts. Plan one task of kind `build`:
+`{"title", "kind": "build", "url": "the page it starts from", "goal": "...", "build": {"name": "2 to 5 words",
+"about": "one sentence", "schedule": {"kind": "manual"}}}`.
+
+The builder works in a tab of its own with the building-automations skill and the person's model. It looks
+at the real pages, writes the script, tests it (the test never presses Send, Post or the like) and saves
+only a script whose test passed. Its goal, self-contained:
+
+- The job step by step, in the person's words.
+- What changes from run to run: text they'll write before Play (a message), a list they'll pick each time
+  ("the LinkedIn search URL I give it"), each item's own data (a first name).
+- Whether the final step (Send, Post, Apply) is part of it. It's approved on every run.
+- A link to try it on, if they gave one, said to be only for the test.
+- `url`: the list page for a job that goes through a list, filters in the address when the site allows it
+  (LinkedIn 1st connections: `https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D`), or the
+  tab's page when the person means the list they have open.
+
+To fix one that failed or change one, use its exact name and put its current steps and the error in the goal:
+the builder tests it as it is, fixes it, and saves it under the same name. To save what a bot just did, put
+the bots' recorded steps from the context in the goal.
+
+### Using saved ones: any do bot
+
+Bots run saved automations with `use_automation` (in a tab of their own, step by step, with the usual
+approvals), and get back what each copy step got. For a repeating one they can pass one item's link. When a
+saved automation covers part of a job, say so in that task's goal: "Use the Play Automation “Message one
+connection” for each profile, with Message set to …". It's quicker and surer than the bot working the page
+out again. The context lists the saved ones with their inputs.
+
+To run one as it is for the person, reply with `"run_automation": "its name"` and no tasks.
 
 ## Approvals
 
@@ -107,4 +141,5 @@ When something failed, say in one sentence what stopped it and what you'll try n
 - [ ] The right tab id for tabs the person named; urls only for pages that aren't open.
 - [ ] No more than 1 or 2 bots on a bot-averse site.
 - [ ] Long jobs have a checkable `done_when`; quick ones don't.
-- [ ] A repeated job is a Play Automation, not a long run.
+- [ ] A repeated job is a Play Automation, made by a `build` task, not a long run.
+- [ ] A job a saved automation covers names it in the goal.

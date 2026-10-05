@@ -332,7 +332,7 @@ def test_rules():
     assert check_action("ghost_eval", {}, {"ghost_read"}, elements)
     plan = parse_plan('ok {"reply": "hi", "tasks": [{"title": "t", "goal": ""}, {"goal": "g", "url": "ftp://x"}]}')
     assert plan == {"reply": "hi", "tasks": [{"title": "Task", "goal": "g", "url": "", "kind": "do", "tab": 0, "keep_open": False,
-                                              "done_when": "", "needs": [], "save_as": None}],
+                                              "done_when": "", "needs": [], "build": None}],
                     "automation": None, "run_automation": ""}
 
 

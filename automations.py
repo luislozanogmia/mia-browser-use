@@ -1,8 +1,10 @@
 """Play Automations: fixed scripts Mia Browser runs step by step, with no AI.
 
-Mia writes them, usually by doing the job once in a tab while every click and
-typed value is recorded (see ghost_chat.ChatHub). Running one later needs no
-model: the bridge replays the steps. AI Workflows are the other kind of work,
+A builder bot writes them: it looks at the real pages in a tab of its own, tests
+the script there (skipping anything that sends), and only a script that passed is
+saved (see ghost_chat.ChatHub). Running one later needs no model: the bridge
+replays the steps, when the person presses Play, on a schedule, or when a bot
+uses it. AI Workflows are the other kind of work,
 where Mia's bots decide each step as they go.
 
 A script is a list of steps:

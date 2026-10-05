@@ -53,12 +53,12 @@ function chat(action, extra = {}) {
   return new Promise(resolve => {
     // Never wait forever: say so when the background doesn't answer.
     const timer = setTimeout(() => {
-      setStatus("Ghost didn't answer. Reload the extension on chrome://extensions.", true);
+      setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
       resolve({ ok: false });
     }, 15000);
     chrome.runtime.sendMessage({ type: "chat", action, ...extra }, reply => {
       clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message || (reply?.ok ? "" : reply?.error || "No answer from Ghost");
+      const error = chrome.runtime.lastError?.message || (reply?.ok ? "" : reply?.error || "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome");
       if (error) setStatus(error, true);
       resolve(error ? { ok: false, error } : reply);
     });
@@ -351,7 +351,7 @@ function when(ts) {
 function renderHistory() {
   const chats = state?.chats || [];
   if (!chats.length) {
-    $("chatList").replaceChildren(el("p", { className: "empty", textContent: connected ? "No past chats yet." : "Connect to Ghost to see past chats." }));
+    $("chatList").replaceChildren(el("p", { className: "empty", textContent: connected ? "No past chats yet." : "Connect to Mia Browser to see past chats." }));
     return;
   }
   $("chatList").replaceChildren(...chats.map(c => {
@@ -392,11 +392,11 @@ function updateSettings(info) {
   const on = Boolean(info.connected);
   connected = on;
   $("conn").classList.toggle("on", on);
-  $("conn").title = on ? "Connected to the Ghost bridge" : "Not connected";
+  $("conn").title = on ? "Connected to Mia Browser" : "Not connected";
   $("dot").classList.toggle("on", on);
   $("statusLabel").textContent = on ? "Connected" : "Disconnected";
   $("statusDetail").textContent = on ? `Bridge on port ${info.port}`
-    : info.paired ? "Starting Ghost on this computer…" : "Run ./install-extension.sh once, and Ghost starts by itself after that";
+    : info.paired ? "Starting Mia Browser on this computer…" : "Run the Mia Browser installer once, and it starts by itself after that";
   if (document.activeElement !== $("port")) $("port").value = info.port;
   $("version").textContent = `Mia v${info.version}`;
   // Pairing is automatic; the manual fields only matter when it hasn't worked.
@@ -415,7 +415,7 @@ function updateSettings(info) {
   // Offer only what applies to this tab.
   $("shareBtn").hidden = Boolean(info.tab_shared);
   $("unshareBtn").hidden = !info.tab_shared;
-  if (!on) setStatus("Not connected to the Ghost bridge. Open settings to connect.", true);
+  if (!on) setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
   else if ($("status").textContent.startsWith("Not connected")) setStatus("");
 }
 

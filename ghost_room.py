@@ -396,6 +396,14 @@ class RoomHub:
         for actor_id, actor in member.actors.items():
             room.presence.pop(actor_id, None)
             out += self._to_all(room, {"type": "member", "event": "left", "actor": actor})
+        # Their shared pages go with them (unless they're still here on another connection): otherwise
+        # pages pile up across reconnects until the room is full and nothing can be shared.
+        here = {a for m in room.members.values() for a in m.actors}
+        for key in [k for k, page in room.pages.items() if page["by"] in member.actors and page["by"] not in here]:
+            page = room.pages.pop(key)
+            for actor_id in [a for a, p in room.presence.items() if p["url"] == key]:
+                del room.presence[actor_id]
+            out += self._to_all(room, {"type": "page", "event": "unshared", "page": page})
         return out
 
     # -- actions -----------------------------------------------------------

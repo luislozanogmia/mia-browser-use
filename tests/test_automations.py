@@ -81,7 +81,7 @@ def test_clean_keeps_a_valid_script_and_describes_it():
 
 
 @pytest.mark.parametrize("change, reason", [
-    ({"steps": [{"do": "click", "text": "Export"}]}, "first step must open"),
+    ({"each": {"links": "x"}, "steps": [{"do": "click", "text": "Export"}, {"do": "click", "text": "Go"}]}, "first step must open"),
     ({"steps": [{"do": "open", "url": "https://a.example/"}, {"do": "type", "text": "x", "value": "{{nope}}"}]}, "{{nope}}"),
     ({"steps": [{"do": "open", "url": "javascript:alert(1)"}]}, "no steps"),
     ({"name": ""}, "name"),
@@ -331,7 +331,7 @@ def test_play_asks_for_its_inputs_in_the_panel():
         shown = hub.states[-1]["automations"][0]
         assert shown["inputs"] == [{"name": "template", "label": "Message"}]
         assert shown["each"] == "Repeats for each link with “linkedin.com/in/” in its address, page after page (“Next”)"
-        assert shown["steps"][1:3] == ["Open the link", "Copy the first word of “Ana Silva” as {{first_name}}"]
+        assert shown["steps"][1:3] == ["Open the link", "Copy the person's first name as {{first_name}}"]
         assert shown["task"] == ""
     asyncio.run(main())
 
@@ -562,3 +562,184 @@ def test_a_bot_that_only_looks_things_up_may_use_an_automation_that_does_not_typ
         assert "types into the page, and your task only looks things up" in prompts[2]
         assert not [c for c, a in browser.calls if c in {"ghost_click", "ghost_fill"}]
     asyncio.run(main())
+
+
+def test_a_loop_can_take_its_items_from_one_part_of_the_page_only():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        page = "[0] link: Recent: Ismael (https://www.linkedin.com/in/ismael)\n[1] link: Ana (https://www.linkedin.com/in/ana)"
+        results = "[1] link: Ana (https://www.linkedin.com/in/ana)"
+
+        async def call(command, args):
+            if command == "ghost_read" and not args.get("selector"):
+                return True, {"url": SEARCH, "content": page}
+            if command == "ghost_read" and args.get("selector") == "main":
+                return True, {"url": SEARCH, "content": results}
+            return await browser(command, args)
+        hub.call = call
+        item = clean({"name": "In main", "each": {"links": "linkedin.com/in/", "within": "main"},
+                      "steps": [{"do": "open", "url": SEARCH}, {"do": "open", "url": "{{link}}"}]})
+        assert item["each"]["within"] == "main"
+        saved = hub.scripts.add(item)
+        assert automations.view(saved)["each"] == "Repeats for each link with “linkedin.com/in/” in its address inside main"
+        task = await hub.play(saved)
+        await finish(task)
+        assert task.result == "Done for 1 link."
+        assert [a["url"] for c, a in browser.calls if c == "ghost_navigate" and "/in/" in a["url"]] == ["https://www.linkedin.com/in/ana"]
+    asyncio.run(main())
+
+
+def test_an_automation_without_an_open_step_runs_on_the_page_the_person_has_open():
+    item = clean({"name": "Message this person", "inputs": [{"name": "template", "label": "Message"}],
+                  "steps": [{"do": "copy", "css": "main h2", "as": "first_name", "words": 1},
+                            {"do": "click", "css": "main a[href*='/messaging/compose/']"},
+                            {"do": "type", "text": "Write a message", "value": "{{template}}"},
+                            {"do": "click", "text": "Send"}]})
+    assert item["steps"][0]["do"] == "copy"
+    with pytest.raises(ValueError, match="list page"):
+        clean({**item, "each": {"links": "linkedin.com/in/"}})
+
+
+def test_one_step_can_be_deleted_unless_the_rest_would_not_work(tmp_path):
+    store = automations.AutomationStore(tmp_path / "a.json")
+    item = store.add(clean({"name": "Four", "inputs": [{"name": "template", "label": "Message"}],
+                            "steps": [{"do": "open", "url": "https://a.example/"},
+                                      {"do": "copy", "css": "h1", "as": "first_name", "words": 1},
+                                      {"do": "type", "text": "Box", "value": "{{template}}"}]}))
+    assert automations.view(item)["uses"] == [[], [], ["template"]]
+    assert store.delete_step(item["id"], 0) == ""
+    assert [s["do"] for s in store.get(item["id"])["steps"]] == ["copy", "type"]
+    assert store.delete_step(item["id"], 7) == "that step isn't there anymore"
+    item = store.add(clean({"name": "Uses", "steps": [{"do": "open", "url": "https://a.example/"},
+                                                      {"do": "copy", "css": "h1", "as": "n"},
+                                                      {"do": "type", "text": "Box", "value": "{{n}}"}]}))
+    assert "without copying it first" in store.delete_step(item["id"], 1)
+    assert len(store.get(item["id"])["steps"]) == 3
+
+
+def test_play_types_the_message_with_its_line_breaks():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({"name": "Lines", "inputs": [{"name": "template", "label": "Message"}],
+                                      "steps": [{"do": "open", "url": "https://a.example/"},
+                                                {"do": "type", "css": "div.box", "value": "{{template}}"}]}))
+        task = await hub.play(item, {"template": "Hola\r\n\r\nEstoy lanzando  AI\nLuis"})
+        await finish(task)
+        assert [a["value"] for c, a in browser.calls if c == "ghost_fill"] == ["Hola\n\nEstoy lanzando  AI\nLuis"]
+    asyncio.run(main())
+
+
+def test_full_access_skips_asking_only_when_the_person_presses_play():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({"name": "Send it", "steps": [{"do": "open", "url": "https://a.example/"},
+                                                                    {"do": "click", "text": "Send"}]}))
+        await hub.handle({"action": "automation_full_access", "automation": item["id"], "on": True})
+        assert automations.view(hub.scripts.get(item["id"]))["full_access"] is True
+        await hub.handle({"action": "play", "automation": item["id"]})
+        task = next(t for t in hub.tasks.values() if t.automation == item["id"])
+        await finish(task)
+        assert task.status == "done" and not task.question
+        assert any(c == "ghost_click" for c, _ in browser.calls)
+        scheduled = await hub.play(hub.scripts.get(item["id"]))  # not pressed: still asks
+        await finish(scheduled)
+        assert scheduled.status == "needs_you" and "Send" in scheduled.question
+        scheduled.job.cancel()
+        await hub.handle({"action": "automation_full_access", "automation": item["id"], "on": False})
+        assert hub.scripts.get(item["id"])["full_access"] is False
+    asyncio.run(main())
+
+
+def test_a_step_finds_its_element_again_when_the_site_redraws_it():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        fills = []
+
+        async def call(command, args):
+            if command == "ghost_fill":
+                fills.append(args)
+                if len(fills) == 1:
+                    return False, "Selector not found: div.box"
+            return await browser(command, args)
+        hub.call = call
+        item = hub.scripts.add(clean({"name": "Redraw", "steps": [{"do": "open", "url": "https://a.example/"},
+                                                                   {"do": "type", "css": "div.box", "value": "Hi"}]}))
+        task = await hub.play(item)
+        await finish(task)
+        assert task.status == "done" and len(fills) == 2
+    asyncio.run(main())
+
+
+def test_a_row_is_added_to_the_spreadsheet_with_the_page_and_copied_values():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        sheet = "https://docs.google.com/spreadsheets/d/abcdefghijklmnopqrstuv/edit#gid=7"
+        appended = []
+
+        async def call(command, args):
+            if command == "ghost_tab_list":
+                return True, {"tabs": [{"id": 91, "url": "https://www.linkedin.com/in/ana/?mini=1", "active": True}]}
+            if command == "ghost_sheet_append":
+                assert args["tab_id"] == 91  # its own tab, opened for the sheet
+                appended.append(args)
+                return True, {"added": True, "row": 590}
+            return await browser(command, args)
+        hub.call = call
+        item = hub.scripts.add(clean({"name": "Log", "inputs": [{"name": "sheet_url", "label": "Spreadsheet link"},
+                                                                {"name": "campaign", "label": "Campaign"}],
+                                      "steps": [{"do": "open", "url": "https://www.linkedin.com/in/ana/"},
+                                                {"do": "copy", "css": "#total", "as": "full_name"},
+                                                {"do": "append", "sheet": "{{sheet_url}}", "tab": "Reach Out",
+                                                 "row": ["{{full_name}}", "", "{{campaign}}", "{{page_url}}"],
+                                                 "unique": "{{page_url}}"}]}))
+        task = await hub.play(item, {"sheet_url": sheet, "campaign": "sdr"})
+        await finish(task)
+        assert appended[0]["row"] == ["42 open items", "", "sdr", "https://www.linkedin.com/in/ana"]
+        assert appended[0]["unique"] == "https://www.linkedin.com/in/ana" and appended[0]["sheet"] == sheet
+        assert task.status == "done" and "Added to the spreadsheet as row 590" in task.result
+    asyncio.run(main())
+
+
+def test_a_box_can_be_a_drop_down_of_saved_searches(tmp_path):
+    store = AutomationStore(tmp_path / "a.json")
+    item = store.add(clean({"name": "Pick", "inputs": [{"name": "campaign", "label": "Campaign", "choices": ["a", "a", " b ", ""]}],
+                            "steps": [{"do": "open", "url": "https://a.example/"},
+                                      {"do": "type", "text": "Box", "value": "{{campaign}}"}]}))
+    assert item["inputs"][0]["choices"] == ["a", "b"]
+    assert store.set_choices(item["id"], "campaign", ["a", "b", "sdr-sales-search"])
+    assert automations.view(store.get(item["id"]))["inputs"][0]["choices"] == ["a", "b", "sdr-sales-search"]
+    assert not store.set_choices(item["id"], "nope", ["x"])
+    assert AutomationStore(tmp_path / "a.json").get(item["id"])["inputs"][0]["choices"] == ["a", "b", "sdr-sales-search"]
+
+
+def test_an_automation_can_be_renamed_from_the_panel(tmp_path):
+    store = AutomationStore(tmp_path / "a.json")
+    steps = [{"do": "open", "url": "https://a.example/"}]
+    one = store.add(clean({"name": "One", "steps": steps}))
+    store.add(clean({"name": "Two", "steps": steps}))
+    assert store.rename(one["id"], "  First   message ") == ""
+    assert AutomationStore(tmp_path / "a.json").get(one["id"])["name"] == "First message"
+    assert "empty" in store.rename(one["id"], "   ")
+    assert "Two" in store.rename(one["id"], "two")
+    assert store.rename(one["id"], "first MESSAGE") == "" and store.get(one["id"])["name"] == "first MESSAGE"
+    assert "gone" in store.rename("auto-00000000", "X")
+
+
+def test_a_drop_down_can_list_a_column_of_the_spreadsheet(tmp_path):
+    store = AutomationStore(tmp_path / "a.json")
+    item = store.add(clean({"name": "Add", "inputs": [{"name": "sheet_url", "label": "Sheet"},
+                                                      {"name": "campaign", "label": "Campaign", "choices": ["new-one"]}],
+                            "steps": [{"do": "append", "sheet": "{{sheet_url}}", "tab": "Reach Out",
+                                       "row": ["{{campaign}}"]}]}))
+    assert automations.view(store.get(item["id"]))["sheet_input"] == "sheet_url"
+    assert store.set_column(item["id"], "campaign", "  Source / Campaign ")
+    assert AutomationStore(tmp_path / "a.json").get(item["id"])["inputs"][1]["column"] == "Source / Campaign"
+    assert store.set_choices(item["id"], "campaign", ["new-one", "two"])
+    assert store.get(item["id"])["inputs"][1]["column"] == "Source / Campaign"
+    assert store.set_column(item["id"], "campaign", "") and "column" not in store.get(item["id"])["inputs"][1]
+    assert not store.set_column(item["id"], "sheet_url", "A")

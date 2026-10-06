@@ -381,7 +381,25 @@ $("claudeBtn").addEventListener("click", () => { $("claudeBtn").disabled = true;
 // -- Play Automations: scripts Mia Browser replays click by click, no AI ----------------------
 
 const openPlays = new Set();  // automations whose details are shown
-const playInputs = new Map();  // what the person typed in an automation's boxes, kept across redraws
+const playInputs = new Map();  // what the person typed in an automation's boxes, kept across redraws and reloads
+const playProblem = new Map();  // why Play didn't start, shown under the automation's button
+const sheetCache = new Map();  // spreadsheet link -> its columns, read once per panel (↻ reads it again)
+
+function sheetData(link) {
+  if (!sheetCache.has(link)) {
+    sheetCache.set(link, { loading: true });
+    chrome.runtime.sendMessage({ type: "sheet-columns", sheet: link }, reply => {
+      const error = chrome.runtime.lastError?.message || (reply?.headers ? "" : reply?.error || "no answer");
+      sheetCache.set(link, error ? { error } : { headers: reply.headers, values: reply.values });
+      renderPlays();
+    });
+  }
+  return sheetCache.get(link);
+}
+
+function saveInputs() {
+  chrome.storage.local.set({ playInputs: Object.fromEntries(playInputs) }).catch(() => {});
+}
 
 function lastRun(last) {
   if (!last?.at) return "";
@@ -391,7 +409,7 @@ function lastRun(last) {
 
 function renderPlays() {
   // Don't redraw under the person's cursor while they type in a box.
-  if (document.activeElement?.closest?.("#playList textarea")) return;
+  if (document.activeElement?.closest?.("#playList textarea, #playList input")) return;
   const plays = state?.automations || [];
   if (!plays.length) {
     $("playList").replaceChildren(el("p", { className: "empty", textContent: connected
@@ -401,28 +419,143 @@ function renderPlays() {
   }
   $("playList").replaceChildren(...plays.map(a => {
     const open = openPlays.has(a.id);
-    const line = a.running ? "Running…" : (a.paused ? "Paused · " : "") + a.schedule;
-    const row = el("button", { className: "play-row", ariaExpanded: String(open) },
-      el("span", { className: "state" + (a.running ? " running" : a.paused ? " paused" : "") }),
-      el("span", { className: "what" }, el("b", { textContent: a.name }), el("small", { textContent: line })));
-    row.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
-    const item = el("div", { className: "play" + (open ? " open" : "") }, row);
-    if (!open) return item;
-    const typed = playInputs.get(a.id) || {};
-    const boxes = (a.inputs || []).map(input => {
-      const box = el("textarea", { rows: 3, value: typed[input.name] ?? "", placeholder: "Use {{first_name}} or other copied values" });
-      box.addEventListener("input", () => playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [input.name]: box.value }));
-      return el("label", { className: "play-input" }, el("span", { textContent: input.label }), box);
-    });
-    const run = el("button", { className: "run", textContent: a.running ? "■ Stop" : "▶ Play" });
+    // Only a schedule or a pause is worth a second line; "runs when you press Play" is what ▶ says.
+    const line = a.running ? "Running…" : a.paused ? `Paused · ${a.schedule}` : a.scheduled ? a.schedule : "";
+    const run = el("button", { className: "icon play-run" + (a.running ? " stop" : ""), textContent: a.running ? "■" : "▶",
+      title: a.running ? "Stop" : "Play", ariaLabel: `${a.running ? "Stop" : "Play"} ${a.name}` });
     run.addEventListener("click", () => {
       if (a.running) { chat("stop", { task: a.task }); return; }
       const values = playInputs.get(a.id) || {};
       const empty = (a.inputs || []).find(input => !String(values[input.name] || "").trim());
-      if (empty) { setStatus(`Fill in “${empty.label}” first.`, true); return; }
-      chat("play", { automation: a.id, inputs: values });
+      if (empty) {
+        // Said inside its edit view, opened for it: the chat's status line is hidden while the automations are open.
+        playProblem.set(a.id, `Write your “${empty.label}” first, then press Play.`);
+        openPlays.add(a.id);
+        renderPlays();
+        return;
+      }
+      playProblem.delete(a.id);
+      chat("play", { automation: a.id, inputs: values }).then(reply => {
+        if (!reply.ok) { playProblem.set(a.id, reply.error || "Mia Browser didn't answer. Try again."); openPlays.add(a.id); renderPlays(); }
+      });
     });
-    const actions = el("div", { className: "play-actions" }, run);
+    const edit = el("button", { className: "icon play-edit" + (open ? " on" : ""), textContent: "✎",
+      title: open ? "Close" : "Edit", ariaLabel: `${open ? "Close" : "Edit"} ${a.name}`, ariaExpanded: String(open) });
+    edit.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
+    const row = el("div", { className: "play-row" },
+      el("span", { className: "state" + (a.running ? " running" : a.paused ? " paused" : "") }),
+      el("span", { className: "what" }, el("b", { textContent: a.name }), line ? el("small", { textContent: line }) : ""),
+      run, edit);
+    const item = el("div", { className: "play" + (open ? " open" : "") }, row);
+    if (!open) return item;
+    const name = el("input", { type: "text", value: a.name, maxLength: 60, ariaLabel: "Name" });
+    const rename = () => {
+      const value = name.value.trim();
+      if (!value) { name.value = a.name; return; }
+      if (value !== a.name) chat("automation_rename", { automation: a.id, name: value });
+    };
+    name.addEventListener("change", rename);
+    name.addEventListener("keydown", event => {
+      if (event.key === "Enter") { event.preventDefault(); name.blur(); }
+      if (event.key === "Escape") { name.value = a.name; name.blur(); }
+    });
+    const typed = playInputs.get(a.id) || {};
+    const boxFor = {};
+    const remember = (name, value) => {
+      playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [name]: value });
+      saveInputs();
+    };
+    const boxes = (a.inputs || []).map(input => {
+      if (Array.isArray(input.choices)) {
+        // A drop-down: the different values of one column of the automation's spreadsheet (most used first),
+        // plus the ones added here that aren't in the sheet yet. The last one picked stays picked.
+        const link = String(typed[a.sheet_input] || "").trim();
+        const sheet = link ? sheetData(link) : null;
+        const ready = sheet && !sheet.loading && !sheet.error;
+        let column = input.column || "";
+        if (ready && !column) {
+          // First time: the column whose header shares a word with the box's label ("Source / Campaign").
+          const words = input.label.toLowerCase().match(/[a-z]{4,}/g) || [];
+          column = sheet.headers.find(h => words.some(w => h.toLowerCase().includes(w))) || "";
+          if (column) chat("automation_column", { automation: a.id, input: input.name, column });
+        }
+        const at = ready ? sheet.headers.indexOf(column) : -1;
+        const fromSheet = at >= 0 ? sheet.values[at] : [];
+        const extra = input.choices.filter(c => !fromSheet.includes(c));
+        const choices = [...fromSheet, ...extra];
+        const picked = choices.includes(typed[input.name]) ? typed[input.name] : (choices[0] || "");
+        if (picked !== (typed[input.name] ?? "")) remember(input.name, picked);
+        const columnBox = el("select", { ariaLabel: `Column for ${input.label}` },
+          el("option", { value: "", textContent: !link ? "Put the spreadsheet link first" : sheet.loading ? "Reading the sheet…"
+            : sheet.error ? "Couldn't read the sheet" : "Pick a column" }),
+          ...(ready ? sheet.headers.map((h, i) => h && el("option", { value: h, textContent: `${String.fromCharCode(65 + i)} · ${h}`,
+            selected: h === column })).filter(Boolean) : []));
+        columnBox.disabled = !ready;
+        columnBox.addEventListener("change", () => chat("automation_column", { automation: a.id, input: input.name, column: columnBox.value }));
+        const reread = el("button", { className: "icon", textContent: "↻", title: "Read the sheet again", ariaLabel: "Read the sheet again" });
+        reread.disabled = !link;
+        reread.addEventListener("click", event => { event.preventDefault(); sheetCache.delete(link); renderPlays(); });
+        const select = el("select", { ariaLabel: input.label },
+          ...(choices.length ? choices.map(c => el("option", { value: c, textContent: c, selected: c === picked }))
+                             : [el("option", { value: "", textContent: "Add one with ＋" })]));
+        select.disabled = !choices.length;
+        select.addEventListener("change", () => remember(input.name, select.value));
+        const add = el("button", { className: "icon", textContent: "＋", title: `Add to ${input.label}`, ariaLabel: `Add to ${input.label}` });
+        add.addEventListener("click", event => {
+          event.preventDefault();
+          const value = (prompt(`New value for “${input.label}”:`) || "").trim().slice(0, 100);
+          if (!value) return;
+          remember(input.name, value);
+          if (!choices.includes(value)) chat("automation_choices", { automation: a.id, input: input.name, choices: [...input.choices, value] });
+          else renderPlays();
+        });
+        // Only the ones added here can be deleted: the sheet's come back while they're in the column.
+        const mine = input.choices.includes(picked) && !fromSheet.includes(picked);
+        const del = el("button", { className: "icon", textContent: "×", ariaLabel: `Delete ${picked}`,
+          title: mine ? `Delete “${picked}”` : picked ? "This one comes from the sheet" : "" });
+        del.disabled = !mine;
+        del.addEventListener("click", event => {
+          event.preventDefault();
+          if (!mine || !confirm(`Delete “${picked}” from ${input.label}?`)) return;
+          remember(input.name, choices.find(c => c !== picked) || "");
+          chat("automation_choices", { automation: a.id, input: input.name, choices: input.choices.filter(c => c !== picked) });
+        });
+        return boxFor[input.name] = el("div", { className: "play-input" }, el("span", { textContent: input.label }),
+          el("div", { className: "play-choice" }, columnBox, reread),
+          el("div", { className: "play-choice" }, select, add, del));
+      }
+      const box = el("textarea", { rows: 3, value: typed[input.name] ?? "", placeholder: "Use {{first_name}} or other copied values" });
+      box.addEventListener("input", () => {
+        playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [input.name]: box.value });
+        saveInputs();
+      });
+      // A new spreadsheet link: the drop-downs read its columns.
+      if (input.name === a.sheet_input) box.addEventListener("change", () => renderPlays());
+      return boxFor[input.name] = el("label", { className: "play-input" }, el("span", { textContent: input.label }), box);
+    });
+    const shown = new Set();
+    const steps = a.steps.map((step, i) => {
+      const remove = el("button", { className: "icon step-del", textContent: "×", title: "Delete this step", ariaLabel: `Delete step ${i + 1}` });
+      remove.addEventListener("click", () => {
+        if (confirm(`Delete step ${i + 1}, “${step}”?`)) chat("automation_step_delete", { automation: a.id, step: i });
+      });
+      // The box this step types goes right under it.
+      const own = (a.inputs || []).map(input => input.name)
+        .filter(name => (a.uses?.[i] || []).includes(name) && boxFor[name] && !shown.has(name));
+      own.forEach(name => shown.add(name));
+      return el("li", {}, el("div", { className: "step" }, el("span", { textContent: step }), remove),
+        ...own.map(name => boxFor[name]));
+    });
+    const rest = (a.inputs || []).filter(input => !shown.has(input.name)).map(input => boxFor[input.name]);
+    const full = el("button", { className: "full" + (a.full_access ? " on" : ""), textContent: a.full_access ? "Full access ✓" : "Full access",
+      ariaPressed: String(!!a.full_access),
+      title: a.full_access ? "Send, Post and the like run without asking when you press Play. Click to ask again."
+                           : "When you press Play, run Send, Post and the like without asking you first" });
+    full.addEventListener("click", () => {
+      if (!a.full_access && !confirm(`Let “${a.name}” click Send, Post and the like without asking, when you press Play?`)) return;
+      chat("automation_full_access", { automation: a.id, on: !a.full_access });
+    });
+    const actions = el("div", { className: "play-actions" }, full);
     if (a.scheduled) {
       const pause = el("button", { textContent: a.paused ? "Resume" : "Pause" });
       pause.addEventListener("click", () => chat(a.paused ? "automation_resume" : "automation_pause", { automation: a.id }));
@@ -440,12 +573,14 @@ function renderPlays() {
     actions.append(del);
     const last = lastRun(a.last_run);
     item.append(el("div", { className: "play-detail" },
+      el("label", { className: "play-input play-name" }, el("span", { textContent: "Name" }), name),
       a.about ? el("p", { textContent: a.about }) : "",
-      el("ol", {}, ...a.steps.map(step => el("li", { textContent: step }))),
+      el("ol", {}, ...steps),
       a.each ? el("p", { textContent: `${a.each}, until the list is used up or you press Stop.`
         + (a.done ? ` ${a.done} done so far; the next run carries on.` : "") }) : "",
-      ...boxes,
+      ...rest,
       last ? el("p", { className: "last " + (a.last_run?.status || ""), textContent: last }) : "",
+      playProblem.has(a.id) ? el("p", { className: "last failed", role: "alert", textContent: playProblem.get(a.id) }) : "",
       actions));
     return item;
   }));
@@ -552,7 +687,10 @@ setInterval(refreshSettings, 5000);
 // -- start --------------------------------------------------------------------------------
 
 (async () => {
-  const stored = await chrome.storage.local.get(["chatPrefs", "roomNames"]);
+  const stored = await chrome.storage.local.get(["chatPrefs", "roomNames", "playInputs"]);
+  for (const [id, values] of Object.entries(stored.playInputs || {})) {
+    if (values && typeof values === "object") playInputs.set(id, values);
+  }
   roomNames = stored.roomNames && typeof stored.roomNames === "object" ? stored.roomNames : {};
   const saved = stored.chatPrefs || {};
   if (saved.model) prefs.model = String(saved.model);

@@ -235,6 +235,13 @@ def _text(value: Any, limit: int) -> str:
     return " ".join(str(value).split())[:limit] if isinstance(value, (str, int, float)) else ""
 
 
+def _typed(value: Any) -> str:
+    """What the person wrote for a box, exactly: line breaks and blank lines stay (a message's format)."""
+    if not isinstance(value, (str, int, float)):
+        return ""
+    return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()[:automations.VALUE_CHARS]
+
+
 def _why(exc: BaseException) -> str:
     """A failure in words, never blank (a timeout has no message of its own)."""
     if isinstance(exc, asyncio.TimeoutError):
@@ -518,6 +525,7 @@ class Task:
         self.needs: list[Task] = []  # tasks whose results this one waits for
         self.quiet = False  # Mia answers from its result together with others', so it says nothing itself
         self.keep_open = False  # the person wants its tab to stay open
+        self.full_access = False  # a Play the person pressed on an automation with Full access: no asking
         self.ask_id = ""  # the page question an explain task answers
         self.request = ""  # what the person wrote, word for word: links and names the plan may have dropped
         self.done_when = ""  # its goal: Mia sends it back to work if it reports before this is met
@@ -668,12 +676,31 @@ class ChatHub:
         if action == "play":
             item = self.scripts.get(msg.get("automation"))
             if item:
-                await self.play(item, msg.get("inputs") if isinstance(msg.get("inputs"), dict) else {})
+                await self.play(item, msg.get("inputs") if isinstance(msg.get("inputs"), dict) else {}, pressed=True)
+        elif action == "automation_choices":
+            self.scripts.set_choices(msg.get("automation"), msg.get("input"), msg.get("choices"))
+            await self.publish()
+        elif action == "automation_column":
+            self.scripts.set_column(msg.get("automation"), msg.get("input"), msg.get("column"))
+            await self.publish()
+        elif action == "automation_rename":
+            why = self.scripts.rename(msg.get("automation"), msg.get("name"))
+            if why:
+                self.say("mia", f"I kept the old name: {why}.")
+            await self.publish()
+        elif action == "automation_full_access":
+            self.scripts.update(msg.get("automation"), full_access=msg.get("on") is True)
+            await self.publish()
         elif action == "automation_reset":
             self.scripts.update(msg.get("automation"), done=[])
             await self.publish()
         elif action in {"automation_pause", "automation_resume"}:
             self.scripts.update(msg.get("automation"), paused=action == "automation_pause")
+            await self.publish()
+        elif action == "automation_step_delete":
+            why = self.scripts.delete_step(msg.get("automation"), msg.get("step"))
+            if why:
+                self.say("mia", f"I kept that step: without it, {why}.")
             await self.publish()
         elif action == "automation_delete":
             self.scripts.delete(msg.get("automation"))
@@ -856,7 +883,7 @@ class ChatHub:
         except Exception:
             return []
         tabs = (value or {}).get("tabs") if ok and isinstance(value, dict) else None
-        return [{"id": t["id"], "url": str(t.get("url") or ""), "title": str(t.get("title") or "")}
+        return [{"id": t["id"], "url": str(t.get("url") or ""), "title": str(t.get("title") or ""), "active": t.get("active") is True}
                 for t in (tabs if isinstance(tabs, list) else [])
                 if isinstance(t, dict) and isinstance(t.get("id"), int) and re.match(r"^https?://", str(t.get("url") or ""))][:40]
 
@@ -1295,8 +1322,11 @@ class ChatHub:
         if tool == "use_automation":
             return f"Result of use_automation:\n<<<page\n{await self.use_automation(task, args)}\npage>>>"
         question = needs_approval(tool, args, task.elements, _text(step.get("confirm"), 200))
-        if question and not await self.wait_for_approval(task, question, args.get("choice")):
-            return "The person rejected that action. Do not try it again; finish another way or stop with done."
+        if question:
+            if not await self.wait_for_approval(task, question, args.get("choice")):
+                return "The person rejected that action. Do not try it again; finish another way or stop with done."
+            if tool in {"ghost_vacuum", "ghost_navigate"}:
+                task.approved_urls.add(args.get("url", ""))  # its scripts may open it again without asking
         await self.publish()
         if tool in {"ghost_vacuum", "ghost_navigate"} and not task.own_tab:
             await self.move_to_own_tab(task, args["url"])
@@ -1419,16 +1449,29 @@ class ChatHub:
         return any(t.automation == automation_id and t.status in {"waiting", "working", "needs_you"}
                    for t in self.tasks.values())
 
-    async def play(self, item: dict, inputs: dict | None = None) -> Task | None:
+    async def play(self, item: dict, inputs: dict | None = None, pressed: bool = False) -> Task | None:
         """Run a Play Automation in a tab of its own; the person's tabs stay as they are."""
         if self.playing(item["id"]):
             self.say("mia", f"“{item['name']}” is already running.")
             await self.publish()
             return None
-        first = item["steps"][0].get("url", "")
+        here = None
+        if item["steps"][0]["do"] != "open":
+            # No page to open: it runs on the tab the person is looking at (the profile they have open).
+            here = next((t for t in await self.open_tabs() if t.get("active")), None)
+            if not here:
+                self.say("mia", f"Open the page “{item['name']}” works on, then press Play.")
+                await self.publish()
+                return None
+        first = here.get("url", "") if here else item["steps"][0].get("url", "")
         task = self.add(Task(next(self.counter), item["name"], item.get("about", ""), first, "play", "parallel", "",
                              self.agent_for(None, first)))
         task.automation, task.keep_open = item["id"], True
+        # Full access: the person pressed Play themselves and is watching, so Send, Post and the like
+        # run without asking. Scheduled runs and bots' runs still ask.
+        task.full_access = pressed and item.get("full_access") is True
+        if here:
+            task.tab_id = here["id"]
         task.job = asyncio.create_task(self.run_play(task, item, inputs or {}))
         await self.publish()
         return task
@@ -1436,16 +1479,19 @@ class ChatHub:
     async def run_play(self, task: Task, item: dict, inputs: dict) -> None:
         steps, n, done_now, skipped = item["steps"], 0, 0, []
         # What the person typed in the panel's boxes, for {{name}}; only the inputs this script asks for.
-        values = {i["name"]: _text(inputs.get(i["name"]), automations.VALUE_CHARS) for i in item.get("inputs") or []}
+        values = {i["name"]: _typed(inputs.get(i["name"])) for i in item.get("inputs") or []}
         try:
             async with self.slots:
                 task.status = "working"
                 if not item.get("each"):
+                    notes = []
                     for n, step in enumerate(steps, 1):
                         task.note = _text(f"{n}/{len(steps)} · {automations.describe_step(step)}", 80)
                         await self.publish()
-                        await self.play_step(task, step, values)
-                    task.result = f"All {len(steps)} steps ran."
+                        out = await self.play_step(task, step, values)
+                        if step["do"] == "append" and out:
+                            notes.append(out)
+                    task.result = f"All {len(steps)} steps ran." + (" " + "; ".join(notes).capitalize() + "." if notes else "")
                 else:
                     n = 1
                     task.note = _text(automations.describe_step(steps[0]), 80)
@@ -1480,10 +1526,11 @@ class ChatHub:
             print(f"[chat] play {item['id']} {task.status}: {task.result[:100]}")
             await self.publish()
 
-    async def page_links(self, task: Task, keep_query: bool = False) -> tuple[list[str], str]:
-        """Every web link on the page, without fragment, trailing slash or (unless keep_query) query, so
-        one person is one link, in order, and the page's address."""
-        ok, value = await self.call("ghost_read", self.play_args(task, {"max_chars": 30000}))
+    async def page_links(self, task: Task, keep_query: bool = False, within: str = "") -> tuple[list[str], str]:
+        """Every web link on the page (or inside the within css), without fragment, trailing slash or
+        (unless keep_query) query, so one person is one link, in order, and the page's address."""
+        args = {"max_chars": 30000, **({"selector": within} if within else {})}
+        ok, value = await self.call("ghost_read", self.play_args(task, args))
         if not ok or not isinstance(value, dict):
             raise RuntimeError(f"couldn't read the list: {_text(value, 120)}")
         page = str(value.get("url") or "")
@@ -1500,10 +1547,10 @@ class ChatHub:
                 links.append(link)
         return links, page
 
-    async def list_links(self, task: Task, pattern: str, skip: set[str]) -> tuple[list[str], str]:
+    async def list_links(self, task: Task, pattern: str, skip: set[str], within: str = "") -> tuple[list[str], str]:
         """The list page's links whose address contains the pattern, in order. A pattern with a "?"
         (item?id=) means the query tells the items apart, so it's kept."""
-        links, page = await self.page_links(task, "?" in pattern)
+        links, page = await self.page_links(task, "?" in pattern, within)
         return [link for link in links if pattern.casefold() in link.casefold() and link not in skip], page
 
     async def play_each(self, task: Task, item: dict, values: dict, dry: bool = False) -> tuple[int, list[str]]:
@@ -1512,7 +1559,7 @@ class ChatHub:
         done = set(self.scripts.get(item["id"]).get("done") or []) if self.scripts.get(item["id"]) else set()
         finished, skipped, fails = 0, [], 0
         while True:
-            links, page = await self.list_links(task, each["links"], done)
+            links, page = await self.list_links(task, each["links"], done, each.get("within", ""))
             for link in links:
                 values["link"] = link
                 try:
@@ -1545,7 +1592,7 @@ class ChatHub:
                 return finished, skipped
             await self.play_call(task, "ghost_click", target)
             await self.play_call(task, "ghost_wait", {"ms": 2500})
-            more, _ = await self.list_links(task, each["links"], done)
+            more, _ = await self.list_links(task, each["links"], done, each.get("within", ""))
             if not more:
                 return finished, skipped
 
@@ -1609,6 +1656,35 @@ class ChatHub:
         if do == "scroll":
             await self.play_call(task, "ghost_scroll", {"direction": step["direction"]})
             return ""
+        if do == "append":
+            fill = lambda text: automations.VAR.sub(lambda m: str(values.get(m[1], "")), text)
+            if "page_url" not in values:
+                tabs = await self.open_tabs()
+                url = next((t["url"] for t in tabs if t["id"] == task.tab_id), "")
+                # The page's own address, the way trackers keep it: no query, # part or trailing slash.
+                values["page_url"] = re.sub(r"[?#].*$", "", url).rstrip("/")
+            sheet = fill(step["sheet"]).strip()
+            if not automations.SHEET_URL.match(sheet):
+                raise RuntimeError(f"the spreadsheet link must be a Google Sheets link, got “{_text(sheet, 60)}”")
+            row = [fill(v) for v in step["row"]]
+            if dry:
+                return f"found it, skipped in this test: on a real run it adds {row} to the spreadsheet"
+            # The sheet opens in a tab of its own (never the person's), where the row is pasted and read back.
+            ok, opened = await self.call("ghost_tab_open", {"url": sheet, "actor_id": task.agent.id})
+            if not ok or not isinstance(opened, dict) or not isinstance(opened.get("id"), int):
+                raise RuntimeError(f"couldn't open the spreadsheet: {_text(opened, 120)}")
+            try:
+                ok, value = await self.call("ghost_sheet_append", {
+                    "sheet": sheet, "row": row, "actor_id": task.agent.id, "tab_id": opened["id"],
+                    "tab_name": fill(step["tab"]).strip(), "unique": fill(step.get("unique", "")).strip()})
+            finally:
+                with suppress(Exception):
+                    await self.call("ghost_tab_close", {"tab_id": opened["id"], "actor_id": task.agent.id})
+            if not ok or not isinstance(value, dict):
+                raise RuntimeError(_text(value, 200))
+            if value.get("already"):
+                return f"already in the spreadsheet (row {value.get('row')}), not added again"
+            return f"added to the spreadsheet as row {value.get('row')}"
         target, line = await self.find_target(task, step, values.get("", {})) if step.get("css") or step.get("text") else ({}, "")
         values[""] = {"key": (step.get("css"), step.get("text")), "target": target, "line": line} if target else {}
         if do == "copy":
@@ -1634,9 +1710,20 @@ class ChatHub:
         question = needs_approval(tool, {**args, "choice": 0}, {0: line} if line else {}, "")
         if question and dry:
             return f"found it, skipped in this test: on a real run it asks the person first ({question})"
-        if question and not await self.wait_for_approval(task, question, args.get("choice")):
+        if question and not task.full_access and not await self.wait_for_approval(task, question, args.get("choice")):
             raise RuntimeError("you rejected that step")
-        await self.play_call(task, tool, args)
+        for attempt in range(3):
+            try:
+                await self.play_call(task, tool, args)
+                break
+            except RuntimeError as exc:
+                # Sites redraw an element right after it appears (LinkedIn's message box): find it again.
+                if attempt == 2 or not re.search(r"not found|is gone|not in your list", str(exc), re.I):
+                    raise
+                await asyncio.sleep(1)
+                target, line = await self.find_target(task, step, {})
+                args = {**args, **target}
+                args.pop("selector" if "choice" in target else "choice", None)
         if do in {"click", "key"}:
             values[""] = {}  # the page may have changed
             await self.play_call(task, "ghost_wait", {"ms": PLAY_SETTLE_MS})
@@ -1694,7 +1781,7 @@ class ChatHub:
         except ValueError as exc:
             return f"Not tested: the script isn't valid: {exc}."
         given = args.get("inputs") if isinstance(args.get("inputs"), dict) else {}
-        values = {i["name"]: _text(given.get(i["name"]), automations.VALUE_CHARS) for i in item["inputs"]}
+        values = {i["name"]: _typed(given.get(i["name"])) for i in item["inputs"]}
         empty = [i["name"] for i in item["inputs"] if not values[i["name"]]]
         steps, lines = item["steps"], []
         first = automations.VAR.sub(lambda m: values.get(m[1], ""), steps[0]["url"])
@@ -1707,11 +1794,12 @@ class ChatHub:
             body = steps[1:]
             if item.get("each"):
                 each = item["each"]
-                links, _ = await self.page_links(task, "?" in each["links"])
+                links, _ = await self.page_links(task, "?" in each["links"], each.get("within", ""))
                 items = [link for link in links if each["links"].casefold() in link.casefold()]
                 if not items:
-                    raise StepFailed(1, steps[0], f"no link on the list page has “{each['links']}” in its address. "
-                                     "Links there: " + ", ".join(links[:25]))
+                    raise StepFailed(1, steps[0], f"no link on the list page"
+                                     + (f" inside {each['within']}" if each.get("within") else "")
+                                     + f" has “{each['links']}” in its address. Links there: " + ", ".join(links[:25]))
                 task.approved_urls.update(items)  # found on the page, not chosen by the model
                 lines.append(f"   The list page has {len(items)} item{'' if len(items) == 1 else 's'} with "
                              f"“{each['links']}”: " + ", ".join(items[:5]) + (" …" if len(items) > 5 else ""))
@@ -1755,7 +1843,7 @@ class ChatHub:
             return (f"“{item['name']}” types into the page, and your task only looks things up. Do it by "
                     "reading pages, or finish and say Mia should give it to a bot that can act.")
         given = args.get("inputs") if isinstance(args.get("inputs"), dict) else {}
-        values = {i["name"]: _text(given.get(i["name"]), automations.VALUE_CHARS) for i in item.get("inputs") or []}
+        values = {i["name"]: _typed(given.get(i["name"])) for i in item.get("inputs") or []}
         link = str(args.get("link") or "")
         steps, lines = item["steps"], []
         # The script's own pages were checked when it was built; a link or address given now wasn't.

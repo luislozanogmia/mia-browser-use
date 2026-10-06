@@ -54,7 +54,7 @@ A link Mia says is "to try it on" goes in `test_automation`'s `link`, never in t
   "about": "Messages each 1st connection with the person's text, starting with their first name.",
   "schedule": {"kind": "manual"},
   "inputs": [{"name": "template", "label": "Message"}],
-  "each": {"links": "linkedin.com/in/", "next": "Next"},
+  "each": {"links": "linkedin.com/in/", "next": "Next", "within": "main"},
   "steps": [
     {"do": "open", "url": "https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D"},
     {"do": "open", "url": "{{link}}"},
@@ -79,6 +79,7 @@ The person fills Message before Play, for example `Hola {{first_name}}, estoy la
 | copy | `{"do": "copy", "text"/"css": ..., "as": "first_name", "words": 1}` | Keeps the element's text for `{{first_name}}`. `words` keeps only the first N words (1 to 20). |
 | wait | `{"do": "wait", "ms": 2000}` or `{"do": "wait", "css": "..."}` | 100 to 10000 ms, or until an element appears (up to 10 s). |
 | scroll | `{"do": "scroll", "direction": "down"}` | down, up, top, bottom. |
+| append | `{"do": "append", "sheet": "{{sheet_url}}", "tab": "{{sheet_tab}}", "row": ["{{full_name}}", "", "{{link}}"]}` | Adds a row at the bottom of a Google Sheet tab, one value per column. Not connected yet: runs skip it and say so. |
 
 ### How a step finds its element
 
@@ -140,6 +141,10 @@ letters, digits and `_`, starting with a letter. Up to 5 inputs.
 - Items done are remembered (up to 5000), so the next run skips them and carries on where the last one
   stopped. Start over in the panel forgets them.
 - An item that fails is skipped and listed in the result; 3 failures in a row stop the run.
+- Pages often have the same kind of link outside the list too: a menu of recently viewed profiles, a
+  sidebar of suggestions (LinkedIn's search page hides recent profiles in its header). Add `"within": "css"`
+  to take items only from the part of the page that holds the list (`"within": "main"`), and check the
+  items the test lists are the ones you expect.
 - Pick `links` so it matches the items and nothing else: `linkedin.com/in/` (profiles), `/jobs/view/`
   (LinkedIn jobs), `upwork.com/jobs/`. Not just `linkedin.com`, which matches every menu link.
 
@@ -166,7 +171,9 @@ that bots can combine.
 ## Safety on every run
 
 - Clicking anything that sends, posts, buys, deletes, connects, follows, applies or similar asks the person
-  first, every time, even inside a loop. Pressing Enter outside a search box asks too.
+  first, every time, even inside a loop. Pressing Enter outside a search box asks too. The person can turn
+  on Full access for an automation in the panel: then the runs they start with ▶ Play don't ask (scheduled
+  runs and bots' runs still do). Only the person turns it on; a script can't.
 - Play Automations never type into password fields. If a site needs signing in, the person signs in first.
 - A run works in its own tab, never the tab the person is using.
 

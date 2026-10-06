@@ -45,9 +45,13 @@ NAME_CHARS = 60
 ABOUT_CHARS = 300
 VALUE_CHARS = 2000
 CATCH_UP = timedelta(minutes=30)  # a scheduled run missed by less than this still runs
-ACTIONS = {"open", "click", "type", "key", "copy", "wait", "scroll"}
+ACTIONS = {"open", "click", "type", "key", "copy", "wait", "scroll", "append"}
+SHEET_URL = re.compile(r"^https://docs\.google\.com/spreadsheets/")
+MAX_COLUMNS = 26
 TARGETED = {"click", "type", "copy"}
 MAX_INPUTS = 5
+MAX_CHOICES = 50  # saved values in one drop-down
+MAX_CHOICE_CHARS = 100
 MAX_DONE = 5000  # links remembered as done, per automation
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,30}")
 VAR = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]{0,30})\s*\}\}")
@@ -70,6 +74,9 @@ def clean_step(step: Any, loop: bool = False) -> dict | None:
         out["css"] = css
     if text:
         out["text"] = text
+    label = _text(step.get("label"), 60)
+    if label and not text and css:  # what the panel calls an element found only by its css
+        out["label"] = label
     if do == "open":
         url = _text(step.get("url"), 1000)
         var = VAR.fullmatch(url)
@@ -97,10 +104,36 @@ def clean_step(step: Any, loop: bool = False) -> dict | None:
         if not css:
             out.pop("text", None)
             out["ms"] = max(100, min(int(step.get("ms") or 1000) if str(step.get("ms") or "").isdigit() else 1000, 10000))
+    if do == "append":
+        # A new row at the bottom of a Google Sheet tab. sheet and tab are usually the person's boxes.
+        sheet, tab = _text(step.get("sheet"), 1000), _text(step.get("tab"), 100)
+        if not (VAR.fullmatch(sheet) or SHEET_URL.match(sheet)) or not tab:
+            return None
+        row = step.get("row") if isinstance(step.get("row"), list) else []
+        out = {"do": do, "sheet": sheet, "tab": tab,
+               "row": [str(v if v is not None else "")[:VALUE_CHARS] for v in row[:MAX_COLUMNS]]}
+        unique = _text(step.get("unique"), 200)
+        if unique:  # a value that's in the tab already means the row is there: skip it
+            out["unique"] = unique
+        return out
     if do == "scroll":
         direction = step.get("direction")
         out = {"do": do, "direction": direction if direction in {"down", "up", "top", "bottom"} else "down"}
     return out
+
+
+def clean_choices(choices: Any) -> dict:
+    """A box with a drop-down: the values the person saved for it (a list of searches, say)."""
+    if not isinstance(choices, list):
+        return {}
+    kept = list(dict.fromkeys(c for c in (_text(c, MAX_CHOICE_CHARS) for c in choices[:MAX_CHOICES]) if c))
+    return {"choices": kept}
+
+
+def clean_column(item: dict) -> dict:
+    """A drop-down can also list the values of one column of the automation's spreadsheet (its header)."""
+    column = _text(item.get("column"), 60) if isinstance(item.get("choices"), list) else ""
+    return {"column": column} if column else {}
 
 
 def clean_schedule(schedule: Any) -> dict:
@@ -125,8 +158,11 @@ def clean(data: Any) -> dict:
     steps = [s for s in (clean_step(s, loop=bool(links)) for s in raw[:MAX_STEPS]) if s]
     if not steps:
         raise ValueError("it has no steps it can run")
-    if steps[0]["do"] != "open" or steps[0]["url"] == "{{link}}":
+    # Without an open step it runs on the page the person has open (a profile they're looking at).
+    if steps[0]["do"] == "open" and steps[0]["url"] == "{{link}}":
         raise ValueError("the first step must open a page")
+    if links and steps[0]["do"] != "open":
+        raise ValueError("a repeating automation's first step must open the list page")
     # A page the person gives before Play is an input; {{link}} is the loop's item.
     if each and not links:
         raise ValueError("a repeating automation needs the text its links contain")
@@ -136,9 +172,14 @@ def clean(data: Any) -> dict:
     for item in (data.get("inputs") if isinstance(data.get("inputs"), list) else [])[:MAX_INPUTS]:
         key = _text(item.get("name"), 31) if isinstance(item, dict) else ""
         if NAME.fullmatch(key) and key not in {i["name"] for i in inputs} and key != "link":
-            inputs.append({"name": key, "label": _text(item.get("label"), 60) or key.replace("_", " ").capitalize()})
-    known = {s["as"] for s in steps if s["do"] == "copy"} | {i["name"] for i in inputs} | ({"link"} if links else set())
+            inputs.append({"name": key, "label": _text(item.get("label"), 60) or key.replace("_", " ").capitalize(),
+                           **clean_choices(item.get("choices")), **clean_column(item)})
+    # page_url is always known: the address of the page the run is on.
+    known = ({s["as"] for s in steps if s["do"] == "copy"} | {i["name"] for i in inputs}
+             | ({"link"} if links else set()) | {"page_url"})
     used = ({m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])}
+            | {m for s in steps if s["do"] == "append"
+               for m in VAR.findall(" ".join([s["sheet"], s["tab"], s.get("unique", ""), *s["row"]]))}
             | {m for s in steps if s["do"] == "open" for m in VAR.findall(s["url"])})
     missing = sorted(used - known)
     if missing:
@@ -147,12 +188,16 @@ def clean(data: Any) -> dict:
            "schedule": clean_schedule(data.get("schedule")), "inputs": inputs}
     if links:
         out["each"] = {"links": links, "next": _text(each.get("next"), 60)}
+        within = _text(each.get("within"), 200)
+        if within:  # only links inside this part of the page (the results, not a menu)
+            out["each"]["within"] = within
     return out
 
 
 def describe_step(step: dict) -> str:
     """A step in plain words, for the panel."""
-    target = f"“{step['text']}”" if step.get("text") else "the element at " + step.get("css", "")
+    named = step.get("text") or step.get("label")
+    target = f"“{named}”" if named else "the element at " + step.get("css", "")
     do = step["do"]
     if do == "open":
         if step["url"] == "{{link}}":
@@ -165,10 +210,18 @@ def describe_step(step: dict) -> str:
     if do == "key":
         return f"Press {step['key']}" + (f" in {target}" if step.get("css") or step.get("text") else "")
     if do == "copy":
+        if step["as"] == "first_name" and step.get("words") == 1:
+            return "Copy the person's first name as {{first_name}}"
+        if step["as"] == "full_name" and not step.get("text"):
+            return "Copy the person's full name as {{full_name}}"
         part = f"the first word{'s' if step['words'] > 1 else ''} of " if step.get("words") else ""
         return f"Copy {part}{target} as {{{{{step['as']}}}}}"
     if do == "wait":
         return f"Wait for {target}" if step.get("css") else f"Wait {step['ms'] / 1000:g} s"
+    if do == "append":
+        tab = f"the tab {step['tab']}" if VAR.fullmatch(step["tab"]) else f"the “{step['tab']}” tab"
+        cols = f": {', '.join(c or '(blank)' for c in step['row'])}" if step["row"] else ""
+        return f"Add a row at the bottom of {tab} of the spreadsheet{cols}"
     return f"Scroll {step['direction']}"
 
 
@@ -254,6 +307,56 @@ class AutomationStore:
             self._save()
         return item
 
+    def delete_step(self, automation_id: Any, index: Any) -> str:
+        """Take one step out; the reason when the rest wouldn't make a working automation."""
+        item = self.get(automation_id)
+        if item is None or not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(item["steps"]):
+            return "that step isn't there anymore"
+        data = {**item, "steps": item["steps"][:index] + item["steps"][index + 1:]}
+        try:
+            cleaned = clean(data)
+        except ValueError as exc:
+            return str(exc)
+        item.update(steps=cleaned["steps"], inputs=cleaned["inputs"])
+        self._save()
+        return ""
+
+    def set_choices(self, automation_id: Any, name: Any, choices: Any) -> bool:
+        """The saved values of one of the automation's drop-downs, added or deleted in the panel."""
+        item = self.get(automation_id)
+        box = next((i for i in (item or {}).get("inputs") or [] if i["name"] == name), None)
+        if box is None:
+            return False
+        box.update(clean_choices(choices if isinstance(choices, list) else []))
+        self._save()
+        return True
+
+    def rename(self, automation_id: Any, name: Any) -> str:
+        """A new name from the panel; the reason it was kept as it was, or "" when renamed."""
+        item = self.get(automation_id)
+        clean = _text(name, NAME_CHARS)
+        if item is None:
+            return "that automation is gone"
+        if not clean:
+            return "the name can't be empty"
+        other = self.find(clean)
+        if other is not None and other is not item:
+            return f"another automation is already called “{other['name']}”"
+        item["name"] = clean
+        self._save()
+        return ""
+
+    def set_column(self, automation_id: Any, name: Any, column: Any) -> bool:
+        """The spreadsheet column a drop-down lists the values of, picked in the panel ("" for none)."""
+        item = self.get(automation_id)
+        box = next((i for i in (item or {}).get("inputs") or [] if i["name"] == name and "choices" in i), None)
+        if box is None:
+            return False
+        box.pop("column", None)
+        box.update(clean_column({"choices": [], "column": column}))
+        self._save()
+        return True
+
     def mark_done(self, automation_id: Any, link: str) -> None:
         """A link the automation finished: the next run skips it."""
         item = self.get(automation_id)
@@ -287,10 +390,18 @@ def view(item: dict, running: bool = False) -> dict:
     return {"id": item["id"], "name": item["name"], "about": item.get("about", ""),
             "schedule": describe_schedule(item.get("schedule") or {}),
             "scheduled": (item.get("schedule") or {}).get("kind") in {"daily", "weekdays"},
-            "paused": bool(item.get("paused")), "running": running,
+            "paused": bool(item.get("paused")), "running": running, "full_access": item.get("full_access") is True,
             "steps": [describe_step(s) for s in item["steps"]], "last_run": last,
+            # Which boxes each step uses, so the panel shows a box under the step that types it.
+            "uses": [sorted(set(VAR.findall(" ".join([s.get("value", ""), s.get("sheet", ""), s.get("tab", ""),
+                                                      *s.get("row", [])]))))
+                     for s in item["steps"]],
             "inputs": [dict(i) for i in item.get("inputs") or []],
+            # The box holding the spreadsheet link, so a drop-down can list one of its columns.
+            "sheet_input": next((m for s in item["steps"] if s["do"] == "append"
+                                 for m in VAR.findall(s.get("sheet", ""))), ""),
             "each": (f"Repeats for each link with “{item['each']['links']}” in its address"
+                     + (f" inside {item['each']['within']}" if item["each"].get("within") else "")
                      + (f", page after page (“{item['each']['next']}”)" if item["each"].get("next") else "")
                      if item.get("each") else ""),
             "done": len(item.get("done") or [])}

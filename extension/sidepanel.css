@@ -187,10 +187,10 @@ body.in-plays .claude-bar { display: none !important; }
 .plays .hint { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
 .plays .empty { color: var(--muted); margin: 8px 0; }
 #playList { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
-.play-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 6px; border: 0; border-radius: 10px;
+.play-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 6px; border: 0; border-radius: 10px;
   background: transparent; text-align: left; }
 .play-row:hover, .play.open .play-row { background: var(--tint); }
-.play-row .state { flex: none; width: 10px; height: 10px; margin-top: 4px; border-radius: 50%; background: #22c55e; }
+.play-row .state { flex: none; width: 10px; height: 10px; border-radius: 50%; background: #22c55e; }
 .play-row .state.paused { background: var(--border-strong); }
 .play-row .state.running { background: var(--work-ink); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
@@ -198,6 +198,14 @@ body.in-plays .claude-bar { display: none !important; }
 .play-row .what { min-width: 0; flex: 1; }
 .play-row b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .play-row small { display: block; color: var(--muted); font-size: 12px; }
+.play-row button.icon { flex: none; width: 30px; height: 30px; padding: 0; border-radius: 8px; border: 1px solid var(--border-strong);
+  background: var(--surface); font-size: 13px; line-height: 1; cursor: pointer; }
+.play-row button.play-run { background: #1D9E75; border-color: #1D9E75; color: #fff; }
+.play-row button.play-run.stop { background: var(--alert); border-color: var(--alert); }
+.play-row button.play-edit { color: var(--muted); }
+.play-row button.play-edit.on, .play-row button.play-edit:hover { color: var(--text); background: var(--tint); }
+.play-name input { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; background: var(--surface);
+  font-size: 13px; font-weight: 400; color: inherit; }
 .play-detail { padding: 2px 6px 10px 26px; display: flex; flex-direction: column; gap: 8px; }
 .play-detail p { margin: 0; color: var(--muted); }
 .play-detail ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
@@ -210,3 +218,12 @@ body.in-plays .claude-bar { display: none !important; }
 .play-input { display: flex; flex-direction: column; gap: 4px; font-weight: 500; }
 .play-input textarea { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; background: var(--surface);
   font-size: 13px; font-weight: 400; }
+.play-detail ol .step { display: flex; align-items: flex-start; gap: 6px; }
+.play-detail ol .step span { flex: 1; }
+.play-detail ol .step-del { flex: none; padding: 0 4px; line-height: 1.2; color: var(--muted, inherit); }
+.play-detail ol .step-del:hover { color: var(--alert); }
+.play-detail ol .play-input { margin: 4px 0 6px; }
+.play-actions button.full.on { background: var(--accent, #1f8f5f); color: #fff; border-color: transparent; }
+.play-choice { display: flex; gap: 6px; align-items: center; }
+.play-choice select { flex: 1; min-width: 0; border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px;
+  background: var(--surface); font-size: 13px; color: inherit; }

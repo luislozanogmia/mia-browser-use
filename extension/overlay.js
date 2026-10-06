@@ -276,7 +276,8 @@
       return elementAnchor(globalThis.__ghostPage.resolve(spec.actor_id, spec.choice), `#${spec.choice}`);
     }
     if (typeof spec.selector === "string" && spec.selector) {
-      const el = document.querySelector(spec.selector);
+      // Inside shadow roots and frames too (LinkedIn's chat window), like the action itself found it.
+      const el = globalThis.__ghostPage?.deepQuery ? globalThis.__ghostPage.deepQuery(spec.selector) : document.querySelector(spec.selector);
       if (!el) throw new Error(`Selector not found: ${spec.selector}`);
       return elementAnchor(el, spec.selector);
     }

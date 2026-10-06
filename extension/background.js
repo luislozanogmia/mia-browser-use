@@ -266,6 +266,8 @@ async function routeCommand(command, args) {
     case "ghost_screenshot":
       return screenshot(args);
 
+    case "ghost_sheet_append":
+      return sheetAppend(args);
     case "ghost_scroll":
       return scroll(args);
 
@@ -509,6 +511,134 @@ async function sheetCells(url, maxChars) {
   return text.slice(0, maxChars);
 }
 
+// -- Adding a row to a Google Sheet: read it, paste the row after the last one, read it back ---------
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+    else if (c !== "\r") cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// A link the same however it was copied: no protocol, www, query, # part or trailing slash, any case.
+function sameKey(text) {
+  return decodeURIComponent(String(text || "").trim()).toLowerCase()
+    .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
+}
+
+async function sheetRows(id, gid) {
+  const csv = await sheetCells(`https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}`, 5_000_000);
+  if (!csv) throw new Error("SHEET_UNREADABLE: couldn't read the sheet; is this Chrome signed in to a Google account that can edit it?");
+  return parseCsv(csv);
+}
+
+async function sheetColumns(link) {
+  const match = SHEET_RE.exec(link);
+  if (!match) throw new Error("Put a Google Sheets link in the spreadsheet box first");
+  const rows = await sheetRows(match[1], /[#&?]gid=(\d+)/.exec(link)?.[1] || "0");
+  const width = Math.min(26, Math.max(0, ...rows.map(r => r.length)));
+  const headers = Array.from({ length: width }, (_, i) => (rows[0]?.[i] || "").trim());
+  // Each column's different values, most used first.
+  const values = headers.map((_, i) => {
+    const count = new Map();
+    for (const row of rows.slice(1)) {
+      const v = (row[i] || "").trim();
+      if (v) count.set(v, (count.get(v) || 0) + 1);
+    }
+    return [...count].sort((a, b) => b[1] - a[1]).map(([v]) => v).slice(0, 200);
+  });
+  return { headers, values };
+}
+
+async function sheetAppend(args) {
+  const match = SHEET_RE.exec(String(args.sheet || ""));
+  if (!match) throw new Error("sheet must be a Google Sheets link (https://docs.google.com/spreadsheets/d/…)");
+  const id = match[1];
+  const gid = /[#&?]gid=(\d+)/.exec(args.sheet)?.[1] || "0";
+  // One line per row: a tab or line break inside a value would spill into other cells.
+  const values = (Array.isArray(args.row) ? args.row : []).slice(0, 26).map(v => String(v ?? "").replace(/[\t\r\n]+/g, " ").trim());
+  if (!values.some(Boolean)) throw new Error("row has no values");
+  const width = values.length;
+  const rows = await sheetRows(id, gid);
+  if (args.unique) {
+    const key = sameKey(args.unique);
+    const at = rows.findIndex(r => r.some(cell => cell && sameKey(cell) === key));
+    if (at >= 0) return { added: false, already: true, row: at + 1 };
+  }
+  // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
+  let last = rows.length;
+  while (last > 0 && !rows[last - 1].slice(0, width).some(cell => cell.trim())) last--;
+  const target = last + 1;
+  const tabId = args.tab_id ?? (await chrome.tabs.create({ url: "about:blank", active: false })).id;
+  const own = args.tab_id === undefined;
+  try {
+    // The sheet with the cursor on the first cell of the new row.
+    await chrome.tabs.update(tabId, { url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}&range=A${target}` });
+    await waitForTabLoad(tabId, 20000);
+    let pasted = "", seen = {}, back = null;
+    for (let attempt = 0; attempt < 30 && !pasted; attempt++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (attempt === 8 && seen.hidden) {
+        // Chrome doesn't draw hidden tabs, and Sheets needs to draw before it takes a paste: show the
+        // sheet for a moment, then go back to the tab the person was on.
+        [back] = await chrome.tabs.query({ active: true, windowId: (await chrome.tabs.get(tabId)).windowId });
+        await chrome.tabs.update(tabId, { active: true });
+      }
+      const [run] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (tsv, tabName) => {
+          const name = document.querySelector("#t-name-box");
+          const frame = document.querySelector(".docs-texteventtarget-iframe");
+          // Sheets takes typing and pastes in its cell editor (older Sheets: a hidden editable frame);
+          // pasting there is a ⌘V on the selected cell.
+          const box = document.querySelector("#waffle-rich-text-editor")
+            || frame?.contentDocument?.querySelector("[contenteditable='true']") || frame?.contentDocument?.body;
+          const open = document.querySelector(".docs-sheet-active-tab .docs-sheet-tab-name")?.textContent?.trim() || "";
+          const seen = { cell: name?.value || "", editor: !!box, tab: open, hidden: document.hidden };
+          if (!box || !/^A\d+$/.test(seen.cell)) return { seen };
+          // The open tab must be the one the person named: the link's gid could point at another.
+          if (tabName && open && open.toLowerCase() !== tabName.toLowerCase()) return { seen, wrongTab: open };
+          box.focus();
+          const data = new DataTransfer();
+          data.setData("text/plain", tsv);
+          box.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+          return { seen, pasted: seen.cell };
+        },
+        args: [values.join("\t"), String(args.tab_name || "").trim()],
+      });
+      const result = run?.result || {};
+      seen = result.seen || seen;
+      if (result.wrongTab) {
+        throw new Error(`SHEET_WRONG_TAB: the link opens the tab “${result.wrongTab}”, not “${args.tab_name}”; nothing was written. Copy the link while that tab is open.`);
+      }
+      pasted = result.pasted || "";
+    }
+    if (back && back.id !== tabId) chrome.tabs.update(back.id, { active: true }).catch(() => {});
+    if (!pasted) throw new Error(`SHEET_NOT_READY: the sheet didn't open on the new row (saw cell “${seen.cell || "none"}”, editor ${seen.editor ? "found" : "missing"}, tab “${seen.tab || "?"}”${seen.hidden ? ", tab hidden" : ""})`);
+    if (pasted !== `A${target}`) throw new Error(`SHEET_WRONG_CELL: the sheet opened on ${pasted}, not A${target}; nothing was checked`);
+    // Sheets saves in the background: read the row back until it's there.
+    for (let attempt = 0; attempt < 16; attempt++) {
+      await new Promise(r => setTimeout(r, 750));
+      const now = (await sheetRows(id, gid))[target - 1] || [];
+      if (values.every((v, i) => (now[i] || "").trim() === v)) return { added: true, row: target, values };
+    }
+    throw new Error(`SHEET_NOT_SAVED: pasted into row ${target} but reading it back didn't show the row; check the sheet`);
+  } finally {
+    if (own) chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 async function withSheetCells(tab, text, maxChars) {
   if (!SHEET_RE.test(tab.url || "")) return text;
   let cells = "";
@@ -688,7 +818,7 @@ async function click(args) {
       try {
         const done = globalThis.__ghostPage.click(actor, choice, selector);
         // Each actor action also moves that actor's ring to what it touched.
-        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        if (announce) try { globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" }); } catch {}  // the marker never fails the action
         return { value: done };
       } catch (err) {
         return { error: err.message };
@@ -720,7 +850,7 @@ async function fill(args) {
       try {
         // Focus-free: sets the value directly, so a human typing elsewhere keeps their cursor.
         const done = globalThis.__ghostPage.fill(actor, choice, selector, value);
-        if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+        if (announce) try { globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" }); } catch {}  // the marker never fails the action
         return { value: done };
       } catch (err) {
         return { error: err.message };
@@ -745,7 +875,7 @@ async function sendKey(args) {
       (actor, choice, selector, text, announce) => {
         try {
           const done = globalThis.__ghostPage.typeInto(actor, choice, selector, text);
-          if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+          if (announce) try { globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" }); } catch {}  // the marker never fails the action
           return { value: done };
         } catch (err) {
           return { error: err.message };
@@ -767,7 +897,7 @@ async function sendKey(args) {
           el.dispatchEvent(new KeyboardEvent("keyup", opts));
           // A page that handles Enter itself cancels the keydown; otherwise the form is sent.
           if (go && key === "Enter" && el.form) el.form.requestSubmit();
-          if (announce) globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" });
+          if (announce) try { globalThis.__ghostOverlay.show({ actor_id: actor, choice, selector, status: "working" }); } catch {}  // the marker never fails the action
           return { value: { key, pressed: true, anchor: globalThis.__ghostPage.anchorOf(el) } };
         } catch (err) {
           return { error: err.message };
@@ -786,6 +916,21 @@ async function sendKey(args) {
       target: { tabId },
       func: (text) => {
         const el = document.activeElement || document.body;
+        if (el.isContentEditable) {
+          // A rich editor (LinkedIn, Gmail, Slack): paste at the cursor like the person would, so
+          // every line break and blank line stays; editors that ignore a paste get the lines typed.
+          const before = el.innerText.length;
+          const data = new DataTransfer();
+          data.setData("text/plain", text);
+          el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+          if (el.innerText.length <= before) {
+            text.split("\n").forEach((line, i) => {
+              if (i) document.execCommand("insertParagraph");
+              if (line) document.execCommand("insertText", false, line);
+            });
+          }
+          return;
+        }
         for (const char of text) {
           el.dispatchEvent(new KeyboardEvent("keydown", { key: char, bubbles: true }));
           el.dispatchEvent(new KeyboardEvent("keypress", { key: char, bubbles: true }));
@@ -1413,7 +1558,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 // ---------------------------------------------------------------------------
 
 let chatState = null;
-const CHAT_ACTIONS = new Set(["claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat",
+const CHAT_ACTIONS = new Set(["automation_choices", "automation_full_access", "automation_step_delete", "claude_setup", "sync", "send", "approve", "reject", "stop", "stop_all", "close", "new", "open_chat", "delete_chat",
   "play", "automation_pause", "automation_resume", "automation_delete", "automation_reset"]);
 
 // What the person is looking at: the tab, the text they selected and the links inside it.
@@ -1450,6 +1595,13 @@ async function chatFromPanel(msg) {
                  agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
                  chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined,
                  automation: typeof msg.automation === "string" ? msg.automation.slice(0, 32) : undefined };
+  if (msg.action === "automation_step_delete" && Number.isInteger(msg.step)) chat.step = msg.step;
+  if (msg.action === "automation_full_access") chat.on = msg.on === true;
+  if (msg.action === "automation_choices" && Array.isArray(msg.choices)) {
+    // A drop-down's saved values: a few short strings.
+    chat.input = String(msg.input || "").slice(0, 31);
+    chat.choices = msg.choices.slice(0, 50).filter(c => typeof c === "string").map(c => c.slice(0, 100));
+  }
   if (msg.action === "play" && msg.inputs && typeof msg.inputs === "object") {
     // What the person typed in a Play Automation's boxes: a few short strings, nothing else.
     chat.inputs = Object.fromEntries(Object.entries(msg.inputs).slice(0, 5)
@@ -1503,6 +1655,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                          accepted: tabs.filter(isAcceptedTab).map(tab => acceptedSharedTabs.get(tab.id).roomUrl) } : null,
       });
     });
+    return true;
+  }
+  // A drop-down in the panel listing one column of a spreadsheet: its headers and each column's values.
+  if (msg.type === "sheet-columns" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
+    sheetColumns(String(msg.sheet || "")).then(sendResponse, error => sendResponse({ error: String(error?.message || error) }));
     return true;
   }
   // From the human tracker in a shared page.

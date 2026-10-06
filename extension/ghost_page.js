@@ -345,8 +345,47 @@
     const selection = win.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
-    const typed = doc.execCommand("insertText", false, value);
-    if (!typed || !el.textContent.includes(value.split("\n")[0].slice(0, 20))) {
+    // Empty it first, the way the editor itself deletes (a selection inside a chat window's shadow
+    // root may cover only part of an old draft); if that leaves text, clear it by hand.
+    doc.execCommand("selectAll");
+    doc.execCommand("delete");
+    if (el.textContent.trim()) {
+      el.replaceChildren(doc.createElement("p"));
+      el.firstChild.append(doc.createElement("br"));
+      el.dispatchEvent(new win.InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    }
+    selection.removeAllRanges();
+    range.selectNodeContents(el.firstChild || el);
+    range.collapse(true);
+    selection.addRange(range);
+    const lines = value.split("\n");
+    // Exactly the value (ignoring spacing) with its line breaks: nothing of an old draft left around it.
+    const bare = text => text.replace(/\s+/g, "");
+    const exact = () => bare(el.textContent) === bare(value);
+    const kept = () => exact() && (el.innerText.match(/\n/g) || []).length >= lines.length - 1;
+    let typed = false;
+    if (lines.length > 1) {
+      // Several lines: paste them the way the person would, so editors (LinkedIn's) keep every line
+      // break and blank line. Editors that ignore a paste get each line typed with Enter between.
+      const data = new win.DataTransfer();
+      data.setData("text/plain", value);
+      el.dispatchEvent(new win.ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      typed = kept();
+      if (!typed) {
+        selection.removeAllRanges();
+        range.selectNodeContents(el);
+        selection.addRange(range);
+        doc.execCommand("delete");
+        lines.forEach((line, i) => {
+          if (i) doc.execCommand("insertParagraph");
+          if (line) doc.execCommand("insertText", false, line);
+        });
+        typed = kept();
+      }
+    } else {
+      typed = doc.execCommand("insertText", false, value);
+    }
+    if (!typed || !exact()) {
       // No text input here: one paragraph per line, as editors keep them.
       el.replaceChildren(...value.split("\n").map(line => {
         const p = doc.createElement("p");
@@ -372,7 +411,8 @@
   /** Append text to one element without focusing it. */
   function typeInto(actor, choice, selector, text) {
     const el = resolve(actor, choice, selector);
-    const current = el.isContentEditable ? el.textContent : (el.value ?? "");
+    // innerText keeps the line breaks the editor already has (textContent runs paragraphs together).
+    const current = el.isContentEditable ? el.innerText.replace(/\n$/, "") : (el.value ?? "");
     setValue(el, current + String(text));
     return { typed: true, characters: String(text).length, tag: el.tagName.toLowerCase(), anchor: anchorOf(el) };
   }

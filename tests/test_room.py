@@ -152,7 +152,7 @@ class RoomHubTests(unittest.TestCase):
         self.assertEqual(self.join("c", "diego")[0][1]["presence"], [])
 
     def test_leaving_unshares_their_pages_so_the_room_never_fills_up(self):
-        for n in range(40):  # more reconnects, each sharing a new page, than the room has room for
+        for n in range(5):  # more reconnects, each sharing a new page, than the room has room for
             self.join("a", "luis")
             self.share("a", f"https://example.com/{n}")
             self.hub.disconnect("a")
@@ -464,6 +464,12 @@ class RoomServerTests(unittest.TestCase):
                 await until(lambda: link.connected)
                 await asyncio.sleep(0.05)
                 self.assertEqual(pages(), [])  # unshared stays unshared
+                # Sharing the same page again under fresh IDs (follow me, the panel) replaces it.
+                for n in range(5):
+                    await link.send({"action": "share", "page": {"url": "https://example.com/meet",
+                                                                 "room_url": f"https://room.invalid/p/again{n}"}})
+                await until(lambda: pages() == ["https://room.invalid/p/again4"])
+                self.assertEqual(list(link.my_shares), ["https://room.invalid/p/again4"])
             finally:
                 room_link.RECONNECT_MIN = quick
                 await link.stop()

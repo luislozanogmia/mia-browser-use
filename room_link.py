@@ -196,6 +196,12 @@ class RoomLink:
                 remote = source.get("room_url") or self.local_pages.get(local) or OPAQUE_PAGE_PREFIX + secrets.token_urlsafe(18)
                 if not isinstance(remote, str) or not remote.startswith(OPAQUE_PAGE_PREFIX) or page_key(remote) != remote:
                     return
+                # One page, one share: sharing it again under a new ID replaces the old
+                # share, or copies pile up (and are re-sent on every rejoin) until the room is full.
+                stale = self.local_pages.get(local)
+                if stale and stale != remote and stale in self.my_shares:
+                    del self.my_shares[stale]
+                    await self._ws.send(json.dumps({"action": "unshare", "url": stale}))
                 self.local_pages[local] = remote
                 outgoing["page"] = {"url": remote, "origin": origin, "title": origin,
                                     **({"href": source["url"]} if source.get("share_link") is True else {})}

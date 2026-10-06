@@ -150,6 +150,7 @@ def test_play_replays_steps_in_its_own_tab_with_copied_values(tmp_path):
             ("ghost_fill", {"choice": 1, "value": "total 42 open items", "tab_id": 91, "actor_id": task.agent.id,
                             "human_ok": True, "expected_url": ""}),
             ("ghost_click", {"choice": 2, "tab_id": 91, "actor_id": task.agent.id, "human_ok": True, "expected_url": ""}),
+            ("ghost_tab_list", {}),  # afterwards: is its tab still open, so its bot stays?
         ]
         assert hub.scripts.get(item["id"])["last_run"]["status"] == "done"
         assert hub.messages[-1]["text"].startswith("▶ Daily report · Done.")
@@ -743,3 +744,41 @@ def test_a_drop_down_can_list_a_column_of_the_spreadsheet(tmp_path):
     assert store.get(item["id"])["inputs"][1]["column"] == "Source / Campaign"
     assert store.set_column(item["id"], "campaign", "") and "column" not in store.get(item["id"])["inputs"][1]
     assert not store.set_column(item["id"], "sheet_url", "A")
+
+
+def test_a_play_bot_lives_while_its_tab_is_open_and_goes_with_it():
+    async def main():
+        browser = PlayBrowser()
+        hub = play_hub(browser)
+        open_tabs = [{"id": 91, "url": "https://a.example/", "active": False},
+                     {"id": 5, "url": "https://www.linkedin.com/in/ana/", "active": True}]
+
+        async def call(command, args):
+            if command == "ghost_tab_list":
+                return True, {"tabs": open_tabs}
+            return await browser(command, args)
+        hub.call = call
+        item = hub.scripts.add(clean({"name": "Look", "steps": [{"do": "open", "url": "https://a.example/"},
+                                                                 {"do": "copy", "css": "#total", "as": "n"}]}))
+        task = await hub.play(item)
+        await finish(task)
+        await asyncio.sleep(0.05)
+        assert task.status == "done" and task.agent.id in hub.agents  # its tab is still open
+        await hub.handle({"action": "tab_closed", "tab": 91})
+        assert task.agent.id not in hub.agents
+
+        # Its tab closed while nobody heard: the bot goes when the run ends.
+        task = await hub.play(item)
+        await finish(task)
+        open_tabs[:] = [t for t in open_tabs if t["id"] != 91]
+        await hub.end_play_bot(task)
+        assert task.agent.id not in hub.agents
+
+        # On the person's own tab it's that tab's bot, not a second one.
+        mine = hub.agent_for(5, "https://www.linkedin.com/in/ana/")
+        here = hub.scripts.add(clean({"name": "Here", "steps": [{"do": "copy", "css": "#total", "as": "n"}]}))
+        task = await hub.play(here)
+        await finish(task)
+        await asyncio.sleep(0.05)
+        assert task.agent is mine and [a for a in hub.agents.values() if a.tab_id == 5] == [mine]
+    asyncio.run(main())

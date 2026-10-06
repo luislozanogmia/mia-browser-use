@@ -1301,8 +1301,10 @@ class ChatHub:
                  {"done": "Done", "failed": "I couldn't finish", "stopped": "Stopped"}.get(task.status, "On it"))
         body = (f"{waiting} Approve or reject it in Mia's side panel." if waiting else task.result)
         try:
-            await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
-                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
+            ok, value = await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
+                                                          "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
+            if not ok:
+                print(f"[chat] couldn't update the card for {task.id}: {_text(value, 200)}")
         except Exception as exc:
             print(f"[chat] couldn't update the card for {task.id}: {exc}")
 

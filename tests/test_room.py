@@ -426,5 +426,51 @@ class RoomServerTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+    def test_a_link_shares_its_pages_again_after_reconnecting(self):
+        async def scenario():
+            import room_link
+
+            quick, room_link.RECONNECT_MIN = room_link.RECONNECT_MIN, 0.01
+            hub = RoomHub()
+            hub.store.create_room("demo", KEY)
+            server = await serve_room(hub, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+
+            async def ignore(_message):
+                pass
+
+            link = RoomLink(f"ws://127.0.0.1:{port}", "demo", KEY, {"id": "luis", "kind": "human"}, ignore)
+            pages = lambda: list(hub.store.rooms["demo"].pages)
+
+            async def until(check):
+                for _ in range(200):
+                    if check():
+                        return
+                    await asyncio.sleep(0.01)
+                self.fail("timed out")
+            try:
+                link.start()
+                await until(lambda: link.connected)
+                await link.send({"action": "share", "page": {"url": "https://example.com/meet"}})
+                await until(lambda: len(pages()) == 1)
+                shared = pages()[0]
+                await link._ws.close()  # the connection drops; the room forgets luis's page
+                await until(lambda: not link.connected)
+                await until(lambda: link.connected and pages() == [shared])
+                await link.send({"action": "unshare", "url": "https://example.com/meet"})
+                await until(lambda: pages() == [])
+                await link._ws.close()
+                await until(lambda: not link.connected)
+                await until(lambda: link.connected)
+                await asyncio.sleep(0.05)
+                self.assertEqual(pages(), [])  # unshared stays unshared
+            finally:
+                room_link.RECONNECT_MIN = quick
+                await link.stop()
+                server.close()
+                await server.wait_closed()
+
+        asyncio.run(scenario())
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

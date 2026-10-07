@@ -712,9 +712,11 @@ class BridgeServer:
                 "target": msg.get("focus"), "pointer": msg.get("pointer"), "label": self.room.me.get("name", ""),
             })
         elif kind == "share" and isinstance(url, str):
+            print(f"[room] tab {tab_id} shares {urlsplit(url).netloc}{urlsplit(url).path[:60]} as …{str(msg.get('room_url'))[-6:]}")
             await self.room.send({"action": "share", "page": {"url": url, "room_url": msg.get("room_url"),
                                                             "share_link": msg.get("share_link") is True}})
         elif kind == "unshare" and isinstance(url, str):
+            print(f"[room] tab {tab_id} unshares …{url[-6:]}")
             await self.room.send({"action": "unshare", "url": url})
         elif kind == "resolve" and msg.get("decision") in {"accept", "reject"} and isinstance(msg.get("id"), str):
             await self.room.send({"action": "resolve", "id": msg["id"], "decision": msg["decision"]})

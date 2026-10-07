@@ -22,6 +22,7 @@ import secrets
 import signal
 import sys
 import time
+from urllib.parse import urlsplit
 from contextlib import suppress
 from pathlib import Path
 
@@ -102,6 +103,7 @@ class BridgeServer:
         # the relay only carries the question and where the area is.
         self.ask_images = {}
         self.ask_threads = {}  # conversation -> the question whose picture it is about
+        self.ask_hrefs = {}  # question or conversation id -> exact address it was asked on, in this browser
         self.bot_looks = {}  # actor id -> last label/color it showed
         self.token = token or load_bridge_token(create=True)
         self.extension_ws = None
@@ -443,7 +445,8 @@ class BridgeServer:
             if ask and not any(args.get(k) is not None for k in ("choice", "selector", "text", "rect")):
                 # An answer goes where the question was asked.
                 args = {**args, "anchor": ask.get("target"), "tab_id": args.get("tab_id") or self._tab_for(ask.get("url")),
-                        "thread": ask.get("thread", ask["id"]), "href": ask.get("href", ""), "question": ask.get("question", "")}
+                        "thread": ask.get("thread", ask["id"]), "href": self._card_href({**ask, "reply_to": ask["id"]}),
+                        "question": ask.get("question", "")}
         call_id = secrets.token_hex(6)
         await self._announce(command, args, call_id, "started")
         result = await self.send_command(command, args, timeout)
@@ -457,6 +460,19 @@ class BridgeServer:
     # ------------------------------------------------------------------
     # Multiplayer: publish local actors, draw remote ones
     # ------------------------------------------------------------------
+
+    def _card_href(self, item):
+        """The address a question card (and its answers) belongs to on this browser's page.
+
+        The page hides a card whose address isn't the one it is showing. The room only knows
+        the site of a page shared without its full link, which never matches a real page, so
+        a question asked here uses the exact address it was asked on, and a bare site is dropped."""
+        for key in ("reply_to", "thread", "id"):
+            if isinstance(item.get(key), str) and item[key] in self.ask_hrefs:
+                return self.ask_hrefs[item[key]]
+        href = item.get("href") if isinstance(item.get("href"), str) else ""
+        parts = urlsplit(href) if href else None
+        return "" if not parts or (parts.path in {"", "/"} and not parts.query) else href
 
     def _tab_for(self, url):
         key = self.room.room_page(url) if self.room else None
@@ -568,7 +584,7 @@ class BridgeServer:
                         "actor": suggestion["actor"], "title": suggestion.get("title", ""),
                         "body": suggestion.get("body", ""), "anchor": suggestion.get("target"),
                         "kind": suggestion.get("kind", "edit"), "question": suggestion.get("question", ""),
-                        "href": suggestion.get("href", ""), "thread": suggestion.get("thread", ""),
+                        "href": self._card_href(suggestion), "thread": suggestion.get("thread", ""),
                         "reply_to": suggestion.get("reply_to", ""), "text": suggestion.get("text", ""),
                     })
                 await self.send_command("ghost_suggestion", args, timeout=10)
@@ -716,6 +732,11 @@ class BridgeServer:
                 self.ask_images.pop(next(iter(self.ask_images)))
             while len(self.ask_threads) > MAX_ASK_IMAGES:
                 self.ask_threads.pop(next(iter(self.ask_threads)))
+            self.ask_hrefs[aid] = url
+            if thread:
+                self.ask_hrefs.setdefault(thread, url)
+            while len(self.ask_hrefs) > 4 * MAX_ASK_IMAGES:
+                self.ask_hrefs.pop(next(iter(self.ask_hrefs)))
             ask = {
                 "action": "ask", "id": aid, "url": self.room_accepted_tabs[tab_id]["room_url"], "question": msg["question"][:600],
                 "text": str(msg.get("text", ""))[:4000], "target": msg.get("target"),

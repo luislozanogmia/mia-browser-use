@@ -1349,9 +1349,11 @@ async function unshareOrphans() {
   const open = new Set((await chrome.tabs.query({})).map(t => t.id));
   const held = new Set([...acceptedSharedTabs].filter(([id]) => open.has(id)).map(([, e]) => e.roomUrl));
   if (followedRoomUrl) held.add(followedRoomUrl);
+  let sent = 0;
   for (const page of sharedPageDetails.values()) {
     if (page.by !== roomMe.id || held.has(page.url)) continue;
     if (Date.now() - (recentShares.get(page.url) || 0) < 20000) continue; // just shared; its tab record may still be settling
+    if (++sent > 8) break; // the room throttles bursts; the rest go when its next list arrives
     toBridge({ type: "unshare", url: page.url });
   }
 }
@@ -1521,7 +1523,15 @@ async function leaveFollowedTab() {
   rememberFollowed();
 }
 
-async function followActiveTab() {
+// Tab, focus, load and room events all call this, often together. Runs overlapped: each awaited the
+// tab list, saw the page "not shared yet" and shared it under its own new ID. One run at a time.
+let followQueue = Promise.resolve();
+function followActiveTab() {
+  followQueue = followQueue.then(followActiveTabNow).catch(() => {});
+  return followQueue;
+}
+
+async function followActiveTabNow() {
   if (!following || !connected) return;
   await followedState;
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });

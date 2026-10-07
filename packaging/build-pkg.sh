@@ -17,6 +17,7 @@
 #   GHOST_SIGN_INSTALLER "Developer ID Installer: ..." identity, signs the .pkg.
 #   GHOST_NOTARY_PROFILE notarytool keychain profile; notarizes and staples the .pkg.
 set -euo pipefail
+export COPYFILE_DISABLE=1  # no ._ resource-fork files in the payload
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"

@@ -1327,6 +1327,34 @@ async function drawSuggestion(args) {
 let sharedPages = new Set();
 let sharedPageDetails = new Map();
 const acceptedSharedTabs = new Map(); // tab id -> {url: exact local URL, roomUrl: opaque page ID}
+const recentShares = new Map(); // opaque page ID -> when this browser shared it (ms)
+// Chrome stops this background process whenever it idles, and reloads lose everything: without this,
+// the room kept pages this browser no longer knew it had shared, and they piled up.
+const sharesRestored = chrome.storage.session.get(["acceptedSharedTabs", "manuallyShared"]).then(data => {
+  for (const [id, entry] of data.acceptedSharedTabs || []) {
+    if (Number.isInteger(id) && entry && typeof entry.url === "string" && typeof entry.roomUrl === "string") acceptedSharedTabs.set(id, entry);
+  }
+  for (const [id, key] of data.manuallyShared || []) {
+    if (Number.isInteger(id) && typeof key === "string") manuallyShared.set(id, key);
+  }
+}).catch(() => {});
+
+function rememberShares() {
+  chrome.storage.session.set({ acceptedSharedTabs: [...acceptedSharedTabs], manuallyShared: [...manuallyShared] }).catch(() => {});
+}
+
+// This browser's pages in the room that no open tab here is sharing any more: let them go.
+async function unshareOrphans() {
+  if (!roomMe?.id) return;
+  const open = new Set((await chrome.tabs.query({})).map(t => t.id));
+  const held = new Set([...acceptedSharedTabs].filter(([id]) => open.has(id)).map(([, e]) => e.roomUrl));
+  if (followedRoomUrl) held.add(followedRoomUrl);
+  for (const page of sharedPageDetails.values()) {
+    if (page.by !== roomMe.id || held.has(page.url)) continue;
+    if (Date.now() - (recentShares.get(page.url) || 0) < 20000) continue; // just shared; its tab record may still be settling
+    toBridge({ type: "unshare", url: page.url });
+  }
+}
 const manuallyShared = new Map(); // tab id -> page key shared from the side panel
 const stoppedByHuman = new Set(); // unshared from the side panel, so following leaves them alone
 let roomMe = null;
@@ -1373,6 +1401,7 @@ function setRoomAccess(tab, accepted, roomUrl = null) {
     acceptedSharedTabs.set(tab.id, { url: tab.url, roomUrl });
   }
   else acceptedSharedTabs.delete(tab.id);
+  rememberShares();
   toBridge({ type: "room_access", tab_id: tab.id, url: tab.url || "",
              room_url: roomUrl || previous?.roomUrl, accepted: acceptedSharedTabs.has(tab.id) });
 }
@@ -1414,6 +1443,8 @@ async function untrackHuman(tabId) {
 }
 
 async function setSharedPages(pages, me) {
+  await sharesRestored;
+  await followedState;
   const before = sharedPages;
   sharedPageDetails = new Map((Array.isArray(pages) ? pages : [])
     .filter(page => page && typeof page.url === "string" && page.url.startsWith("https://room.invalid/p/")
@@ -1424,7 +1455,8 @@ async function setSharedPages(pages, me) {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
     const entry = acceptedSharedTabs.get(tab.id);
-    if (entry && (!sharedPages.has(entry.roomUrl) || entry.url !== tab.url)) {
+    const inFlight = Date.now() - (recentShares.get(entry?.roomUrl) || 0) < 20000; // shared, not yet confirmed by the room
+    if (entry && ((!sharedPages.has(entry.roomUrl) && !inFlight) || entry.url !== tab.url)) {
       setRoomAccess(tab, false);
     }
     if (entry && before.has(entry.roomUrl) && !sharedPages.has(entry.roomUrl)) {
@@ -1436,6 +1468,7 @@ async function setSharedPages(pages, me) {
       ws?.send(JSON.stringify({ type: "tab_ready", tab_id: tab.id, url: tab.url }));
     }
   }
+  await unshareOrphans();
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
@@ -1609,16 +1642,20 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 // ---------------------------------------------------------------------------
 
 function toBridge(message) {
+  if (message.type === "share" && typeof message.room_url === "string") recentShares.set(message.room_url, Date.now());
   if (connected && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
 
 // A closed tab takes its bot off Mia's list, whether or not the panel is open.
 chrome.tabs.onRemoved.addListener(tabId => {
   if (acceptedSharedTabs.has(tabId)) {
-    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId).url,
-               room_url: acceptedSharedTabs.get(tabId).roomUrl, accepted: false });
+    const { url, roomUrl } = acceptedSharedTabs.get(tabId);
+    toBridge({ type: "room_access", tab_id: tabId, url, room_url: roomUrl, accepted: false });
+    if (sharedPageDetails.get(roomUrl)?.by === roomMe?.id && roomUrl !== followedRoomUrl) toBridge({ type: "unshare", url: roomUrl });
     acceptedSharedTabs.delete(tabId);
   }
+  manuallyShared.delete(tabId);
+  rememberShares();
   toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
 });
 
@@ -1829,13 +1866,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                    share_link: msg.share_link === true });
         manuallyShared.set(tab.id, key);
         stoppedByHuman.delete(key);
-        setRoomAccess(tab, true, roomUrl);
+        setRoomAccess(tab, true, roomUrl); // also saves manuallyShared
       } else {
         const entry = acceptedSharedTabs.get(tab.id);
         if (entry && sharedPageDetails.get(entry.roomUrl)?.by === roomMe?.id) {
           toBridge({ type: "unshare", tab_id: tab.id, url: entry.roomUrl });
         }
         manuallyShared.delete(tab.id);
+        rememberShares();
         stoppedByHuman.add(key);
         if (followedUrl === key && followedTabId === tab.id) {
           followedUrl = null; followedTabId = null; followedRoomUrl = null;

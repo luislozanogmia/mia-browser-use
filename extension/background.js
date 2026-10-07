@@ -561,28 +561,78 @@ async function sheetColumns(link) {
   return { headers, values };
 }
 
+// The tab the person named, found by name in the open sheet: the link's gid often points at
+// whichever tab was open when the link was copied. Returns the gid of the named tab.
+async function sheetTabGid(tabId, id, linkGid, tabName) {
+  const want = String(tabName || "").trim();
+  if (!want) return linkGid;
+  await chrome.tabs.update(tabId, { url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${linkGid}` });
+  await waitForTabLoad(tabId, 20000);
+  let names = [], back = null;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await new Promise(r => setTimeout(r, 500));
+    const [run] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (want) => {
+        const tabs = [...document.querySelectorAll(".docs-sheet-tab")];
+        const nameOf = t => t.querySelector(".docs-sheet-tab-name")?.textContent?.trim() || "";
+        const names = tabs.map(nameOf).filter(Boolean);
+        if (!names.length) return { names, hidden: document.hidden };
+        const open = document.querySelector(".docs-sheet-active-tab");
+        const gid = /gid=(\d+)/.exec(location.hash)?.[1] || "";
+        if (open && nameOf(open).toLowerCase() === want.toLowerCase()) return { names, gid };
+        const target = tabs.find(t => nameOf(t).toLowerCase() === want.toLowerCase());
+        if (!target) return { names, missing: true };
+        // Sheets switches tabs on the mouse going down on the tab's name.
+        const el = target.querySelector(".docs-sheet-tab-name") || target;
+        for (const type of ["mousedown", "mouseup", "click"]) {
+          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+        }
+        return { names, switching: true, hidden: document.hidden };
+      },
+      args: [want],
+    });
+    const result = run?.result || {};
+    names = result.names || names;
+    if (result.gid) {
+      if (back && back.id !== tabId) chrome.tabs.update(back.id, { active: true }).catch(() => {});
+      return result.gid;
+    }
+    if (result.missing) {
+      throw new Error(`SHEET_NO_SUCH_TAB: the spreadsheet has no tab called “${want}”; its tabs are ${names.map(n => `“${n}”`).join(", ")}. Nothing was written.`);
+    }
+    if (attempt === 8 && result.hidden) {
+      // Sheets doesn't draw, or switch tabs, while hidden: show it briefly, then go back.
+      [back] = await chrome.tabs.query({ active: true, windowId: (await chrome.tabs.get(tabId)).windowId });
+      await chrome.tabs.update(tabId, { active: true });
+    }
+  }
+  throw new Error(`SHEET_NOT_READY: couldn't open the tab “${want}” (saw tabs ${names.map(n => `“${n}”`).join(", ") || "none"}); nothing was written`);
+}
+
 async function sheetAppend(args) {
   const match = SHEET_RE.exec(String(args.sheet || ""));
   if (!match) throw new Error("sheet must be a Google Sheets link (https://docs.google.com/spreadsheets/d/…)");
   const id = match[1];
-  const gid = /[#&?]gid=(\d+)/.exec(args.sheet)?.[1] || "0";
+  const linkGid = /[#&?]gid=(\d+)/.exec(args.sheet)?.[1] || "0";
   // One line per row: a tab or line break inside a value would spill into other cells.
   const values = (Array.isArray(args.row) ? args.row : []).slice(0, 26).map(v => String(v ?? "").replace(/[\t\r\n]+/g, " ").trim());
   if (!values.some(Boolean)) throw new Error("row has no values");
   const width = values.length;
-  const rows = await sheetRows(id, gid);
-  if (args.unique) {
-    const key = sameKey(args.unique);
-    const at = rows.findIndex(r => r.some(cell => cell && sameKey(cell) === key));
-    if (at >= 0) return { added: false, already: true, row: at + 1 };
-  }
-  // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
-  let last = rows.length;
-  while (last > 0 && !rows[last - 1].slice(0, width).some(cell => cell.trim())) last--;
-  const target = last + 1;
   const tabId = args.tab_id ?? (await chrome.tabs.create({ url: "about:blank", active: false })).id;
   const own = args.tab_id === undefined;
   try {
+    const gid = await sheetTabGid(tabId, id, linkGid, args.tab_name);
+    const rows = await sheetRows(id, gid);
+    if (args.unique) {
+      const key = sameKey(args.unique);
+      const at = rows.findIndex(r => r.some(cell => cell && sameKey(cell) === key));
+      if (at >= 0) return { added: false, already: true, row: at + 1 };
+    }
+    // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
+    let last = rows.length;
+    while (last > 0 && !rows[last - 1].slice(0, width).some(cell => cell.trim())) last--;
+    const target = last + 1;
     // The sheet with the cursor on the first cell of the new row.
     await chrome.tabs.update(tabId, { url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}&range=A${target}` });
     await waitForTabLoad(tabId, 20000);
@@ -620,7 +670,7 @@ async function sheetAppend(args) {
       const result = run?.result || {};
       seen = result.seen || seen;
       if (result.wrongTab) {
-        throw new Error(`SHEET_WRONG_TAB: the link opens the tab “${result.wrongTab}”, not “${args.tab_name}”; nothing was written. Copy the link while that tab is open.`);
+        throw new Error(`SHEET_WRONG_TAB: the sheet opened on the tab “${result.wrongTab}”, not “${args.tab_name}”; nothing was written`);
       }
       pasted = result.pasted || "";
     }

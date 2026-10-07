@@ -113,7 +113,10 @@ class AskBotTests(unittest.TestCase):
         prompt = build_prompt(ASK)
         self.assertIn("<<<\nwhats this?\n>>>", prompt)
         self.assertIn("Question from Luis", prompt)
-        self.assertEqual(split_answer("**Title**\n\nline one\nline two"), ("Title", "line one line two"))
+        self.assertEqual(split_answer("**Title**\n\nline one\nline two"), ("Title", "line one\nline two"))
+        # Bullets keep their lines; bold in the title line is dropped, since the card draws the title plain.
+        title, body = split_answer("Profile of **Carlos Arenas**\n- **1st**: connected\n\n\n\n- **Title**:  BDM\n")
+        self.assertEqual((title, body), ("Profile of Carlos Arenas", "- **1st**: connected\n\n- **Title**: BDM"))
         self.assertEqual(split_answer(""), ("No answer", ""))
 
     def test_follow_up_prompt_carries_the_conversation(self):

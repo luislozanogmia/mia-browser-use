@@ -595,7 +595,7 @@
     heading.style.fontWeight = "600";
     parts.push(heading);
     if (spec.body) {
-      parts.push(...markdownBlocks(String(spec.body).slice(0, 600), ""));
+      parts.push(...markdownBlocks(String(spec.body).slice(0, 2000), ""));
     }
     if (kind === "edit") {
       // Only a proposed change needs a decision.
@@ -752,7 +752,7 @@
       turn.by = name;
     } else {
       turn.q ||= String(spec.question || "").slice(0, 600);
-      turn.a = { title: String(spec.title || "").slice(0, 120), body: String(spec.body || "").slice(0, 600),
+      turn.a = { title: String(spec.title || "").slice(0, 120), body: String(spec.body || "").slice(0, 2000),
                  by: botTitle(name, actor.owner) };
     }
     renderConversation(card);

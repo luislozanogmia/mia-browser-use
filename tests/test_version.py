@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "0.5.3"
+EXPECTED_VERSION = "0.5.4"
 
 
 class VersionTests(unittest.TestCase):

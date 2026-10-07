@@ -1,5 +1,5 @@
 name: ghost
-version: 0.5.3
+version: 0.5.4
 description: "Control a signed-in Chrome window or the Hermes Desktop browser through authenticated local transports."
 author: Luis Lozano
 kind: standalone

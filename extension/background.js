@@ -1348,7 +1348,7 @@ async function unshareOrphans() {
   if (!roomMe?.id) return;
   const open = new Set((await chrome.tabs.query({})).map(t => t.id));
   const held = new Set([...acceptedSharedTabs].filter(([id]) => open.has(id)).map(([, e]) => e.roomUrl));
-  if (followedRoomUrl) held.add(followedRoomUrl);
+  for (const [id, roomUrl] of followedTabs) if (open.has(id)) held.add(roomUrl);
   let sent = 0;
   for (const page of sharedPageDetails.values()) {
     if (page.by !== roomMe.id || held.has(page.url)) continue;
@@ -1484,80 +1484,73 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 });
 
 // ---------------------------------------------------------------------------
-// Follow me: keep the tab the human is looking at shared with the room
+// Follow me: every tab the human looks at is shared, and stays shared while it's open
 // ---------------------------------------------------------------------------
+//
+// One share per tab, under one ID for as long as the tab lives, wherever it goes: the room replaces
+// a share with the same ID instead of adding a copy. Looking at another tab doesn't unshare this one
+// (that wiped its cards and refused its bot's answers). Closing the tab, or turning following off, does.
 
 let following = false;
-let followedUrl = null; // shared by following, so following may unshare it
-let followedTabId = null;
-let followedRoomUrl = null;
-// Chrome stops this background process whenever it idles. Without this, every restart
-// shared the same tab again under a new ID and the copies piled up until the room was full.
-const followedState = chrome.storage.session.get("followed").then(data => {
-  const f = data.followed;
-  if (f && Number.isInteger(f.tabId) && typeof f.url === "string" && typeof f.roomUrl === "string") {
-    followedTabId = f.tabId; followedUrl = f.url; followedRoomUrl = f.roomUrl;
+const followedTabs = new Map(); // tab id -> opaque room page ID
+// Chrome stops this background process whenever it idles: the map lives in session storage too.
+const followedState = chrome.storage.session.get("followedTabs").then(data => {
+  for (const [id, roomUrl] of data.followedTabs || []) {
+    if (Number.isInteger(id) && typeof roomUrl === "string") followedTabs.set(id, roomUrl);
   }
 }).catch(() => {});
 
 function rememberFollowed() {
-  const followed = followedRoomUrl ? { tabId: followedTabId, url: followedUrl, roomUrl: followedRoomUrl } : null;
-  chrome.storage.session.set({ followed }).catch(() => {});
+  chrome.storage.session.set({ followedTabs: [...followedTabs] }).catch(() => {});
 }
 
-async function leaveFollowedTab() {
-  const keptByOwner = manuallyShared.get(followedTabId) === followedUrl;
-  if (followedRoomUrl && !keptByOwner) {
-    toBridge({ type: "unshare", url: followedRoomUrl });
-  }
-  if (Number.isInteger(followedTabId)) {
-    const tab = await chrome.tabs.get(followedTabId).catch(() => null);
-    if (tab && !keptByOwner) {
-      setRoomAccess(tab, false);
-      await untrackHuman(followedTabId);
-    }
-  }
-  followedUrl = null;
-  followedTabId = null;
-  followedRoomUrl = null;
+async function unfollowTab(tabId) {
+  const roomUrl = followedTabs.get(tabId);
+  if (!roomUrl) return;
+  followedTabs.delete(tabId);
   rememberFollowed();
+  if (manuallyShared.has(tabId)) return; // the human shared it themselves; theirs to stop
+  toBridge({ type: "unshare", url: roomUrl });
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab) {
+    setRoomAccess(tab, false);
+    await untrackHuman(tabId);
+  }
 }
 
-// Tab, focus, load and room events all call this, often together. Runs overlapped: each awaited the
-// tab list, saw the page "not shared yet" and shared it under its own new ID. One run at a time.
+// Tab, focus, load and room events all call this, often together; one run at a time, or runs
+// overlapped and each shared the same tab under its own new ID.
 let followQueue = Promise.resolve();
 function followActiveTab() {
-  followQueue = followQueue.then(followActiveTabNow).catch(() => {});
+  return followTab(null);
+}
+function followTab(tabId) {
+  followQueue = followQueue.then(() => followTabNow(tabId)).catch(() => {});
   return followQueue;
 }
 
-async function followActiveTabNow() {
+async function followTabNow(tabId) {
   if (!following || !connected) return;
   await followedState;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  await sharesRestored;
+  const tab = Number.isInteger(tabId)
+    ? await chrome.tabs.get(tabId).catch(() => null)
+    : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
   const key = tab && pageKey(tab.url);
-  if (!key || (key === followedUrl && tab.id === followedTabId
-      && acceptedSharedTabs.get(tab.id)?.url === tab.url
-      && acceptedSharedTabs.get(tab.id)?.roomUrl === followedRoomUrl)) return;
-  if (stoppedByHuman.has(key)) {
-    // The human stopped sharing this page; following doesn't share it again.
-    await leaveFollowedTab();
-    return;
-  }
-  // Leave the last followed page, unless the human shared it themselves.
-  const samePage = followedTabId === tab.id && followedUrl === key && Boolean(followedRoomUrl);
-  if (!samePage) await leaveFollowedTab();
+  if (!key || stoppedByHuman.has(key)) return; // not a web page, or the human stopped sharing this page
   const accepted = acceptedSharedTabs.get(tab.id);
-  if (isAcceptedTab(tab) && sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id) return;
-  // One page, one ID: the same tab on the same page keeps the ID it already has
-  // (the room replaces a share with the same ID instead of adding a copy).
-  const keep = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : (samePage ? followedRoomUrl : null);
-  followedUrl = key;
-  followedTabId = tab.id;
-  followedRoomUrl = keep || newRoomPageUrl();
-  rememberFollowed();
-  setRoomAccess(tab, true, followedRoomUrl);
-  if (!sharedPages.has(followedRoomUrl)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: followedRoomUrl });
+  // Shared by hand, or by someone else's invitation: nothing for following to do.
+  if (isAcceptedTab(tab) && (manuallyShared.get(tab.id) === key || sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id)) return;
+  const roomUrl = followedTabs.get(tab.id) || accepted?.roomUrl || newRoomPageUrl();
+  if (followedTabs.get(tab.id) !== roomUrl) {
+    followedTabs.set(tab.id, roomUrl);
+    rememberFollowed();
+  }
+  if (accepted?.roomUrl !== roomUrl || accepted.url !== tab.url) setRoomAccess(tab, true, roomUrl);
+  const page = sharedPageDetails.get(roomUrl);
+  if (!page || page.origin !== siteOrigin(tab.url)) {
+    toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: roomUrl });
+  }
 }
 
 async function setFollow(on) {
@@ -1566,13 +1559,18 @@ async function setFollow(on) {
   if (on) {
     followActiveTab();
   } else {
-    await leaveFollowedTab();
+    for (const tabId of [...followedTabs.keys()]) await unfollowTab(tabId);
   }
 }
 
 chrome.tabs.onActivated.addListener(() => followActiveTab());
 chrome.windows.onFocusChanged.addListener(id => { if (id !== chrome.windows.WINDOW_ID_NONE) followActiveTab(); });
-chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active) followActiveTab(); });
+// A followed tab that loads a new page keeps its share wherever it goes, even in the background.
+chrome.tabs.onUpdated.addListener((id, info, tab) => {
+  if (info.status !== "complete") return;
+  if (followedTabs.has(id)) followTab(id);
+  else if (tab.active) followActiveTab();
+});
 
 // ---------------------------------------------------------------------------
 // Reel mode: a screenshot of every shared page the human visits and of every
@@ -1661,11 +1659,12 @@ chrome.tabs.onRemoved.addListener(tabId => {
   if (acceptedSharedTabs.has(tabId)) {
     const { url, roomUrl } = acceptedSharedTabs.get(tabId);
     toBridge({ type: "room_access", tab_id: tabId, url, room_url: roomUrl, accepted: false });
-    if (sharedPageDetails.get(roomUrl)?.by === roomMe?.id && roomUrl !== followedRoomUrl) toBridge({ type: "unshare", url: roomUrl });
+    if (sharedPageDetails.get(roomUrl)?.by === roomMe?.id) toBridge({ type: "unshare", url: roomUrl });
     acceptedSharedTabs.delete(tabId);
   }
   manuallyShared.delete(tabId);
   rememberShares();
+  if (followedTabs.delete(tabId)) rememberFollowed();
   toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
 });
 
@@ -1871,7 +1870,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tab || !pageKey(tab.url)) return sendResponse({ ok: false, error: "Only http(s) pages can be shared" });
       const key = pageKey(tab.url);
       if (msg.type === "share-tab") {
-        const roomUrl = newRoomPageUrl();
+        const roomUrl = followedTabs.get(tab.id) || newRoomPageUrl(); // a followed tab keeps its ID
         toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: roomUrl,
                    share_link: msg.share_link === true });
         manuallyShared.set(tab.id, key);
@@ -1885,9 +1884,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         manuallyShared.delete(tab.id);
         rememberShares();
         stoppedByHuman.add(key);
-        if (followedUrl === key && followedTabId === tab.id) {
-          followedUrl = null; followedTabId = null; followedRoomUrl = null;
-        }
+        if (followedTabs.delete(tab.id)) rememberFollowed();
         setRoomAccess(tab, false);
       }
       sendResponse({ ok: true });

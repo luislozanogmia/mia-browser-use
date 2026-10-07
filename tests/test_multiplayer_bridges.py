@@ -231,6 +231,24 @@ class TwoMachineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             await ana.execute("room_ask_image", {"id": ask["id"]}, 10)
 
+    async def test_question_and_answer_cards_belong_to_the_exact_page_asked_on(self):
+        # The page hides a card whose address isn't its own. The room only knows the site of a
+        # page shared without its link, so the cards must not carry that bare site.
+        await self._share()
+        luis, luis_link, luis_ext = self.machines["luis"]
+        await luis._extension_event({"type": "ask", "tab_id": 11, "url": SHEET, "question": "What is this?",
+                                     "target": {"rect": {"x": 1, "y": 2, "w": 30, "h": 40}}})
+        await self._until(lambda: luis_link.asks)
+        ask = next(iter(luis_link.asks.values()))
+        self.assertEqual(ask["href"], "https://docs.google.com/")  # the room only has the site
+        cards = lambda: [a for c, a in luis_ext.commands if c in {"ghost_suggestion", "ghost_suggest"} and not a.get("clear")]
+        await self._until(lambda: any(a.get("kind") == "ask" for a in cards()))
+        ok, _ = await luis.execute("ghost_suggest", {"actor_id": "luis-mia-1", "tab_id": 11, "id": f"re-{ask['id']}",
+                                                     "reply_to": ask["id"], "kind": "note", "title": "Done", "body": "A chart"}, 10)
+        self.assertTrue(ok)
+        await self._until(lambda: len(cards()) >= 3)  # the question, the answer, and the answer from the room
+        self.assertEqual({a.get("href") for a in cards()}, {SHEET})
+
     async def test_follow_up_gets_the_same_picture_and_the_threads_text(self):
         await self._share()
         luis, luis_link, _ = self.machines["luis"]

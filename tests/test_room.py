@@ -151,21 +151,13 @@ class RoomHubTests(unittest.TestCase):
         self.assertEqual(left[0], ("b", {"type": "member", "event": "left", "actor": {"id": "luis", "kind": "human", "name": "luis"}}))
         self.assertEqual(self.join("c", "diego")[0][1]["presence"], [])
 
-    def test_leaving_unshares_their_pages_so_the_room_never_fills_up(self):
-        for n in range(5):  # more reconnects, each sharing a new page, than the room has room for
-            self.join("a", "luis")
-            self.share("a", f"https://example.com/{n}")
-            self.hub.disconnect("a")
-        pages = self.hub.store.rooms["demo"].pages
-        self.assertEqual(list(pages), [])
-        self.join("b", "ana")
-        self.share("b", "https://example.com/ana")
+    def test_a_dropped_connection_keeps_their_pages_shared(self):
+        # Mia Browser reconnects whenever Chrome restarts the extension; unsharing then
+        # wiped every answer box on the page and refused answers to open questions.
         self.join("a", "luis")
-        self.share("a", "https://example.com/luis")
-        left = self.hub.disconnect("a")
-        self.assertIn(("b", {"type": "page", "event": "unshared",
-                             "page": {"url": page_key("https://example.com/luis"), "title": "Q4 budget", "by": "luis"}}), left)
-        self.assertEqual(list(pages), [page_key("https://example.com/ana")])  # ana's stays
+        self.share("a", "https://example.com/doc")
+        self.hub.disconnect("a")
+        self.assertEqual(list(self.hub.store.rooms["demo"].pages), [page_key("https://example.com/doc")])
 
     def test_untrusted_fields_are_cleaned(self):
         self.join("a", "luis")

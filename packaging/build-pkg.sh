@@ -82,7 +82,9 @@ if [ -n "${GHOST_SIGN_APP:-}" ]; then
   echo "→ Signing bundled programs"
   find "$STAGE" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 |
     while IFS= read -r -d '' f; do
-      file -b "$f" | grep -q Mach-O && codesign --force --timestamp --options runtime --sign "$GHOST_SIGN_APP" "$f"
+      if file -b "$f" | grep -q Mach-O; then
+        codesign --force --timestamp --options runtime --sign "$GHOST_SIGN_APP" "$f" 2>&1 | grep -v 'replacing existing signature' || true
+      fi
     done
 fi
 

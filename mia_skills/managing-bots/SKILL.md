@@ -91,11 +91,9 @@ To run one as it is for the person, reply with `"run_automation": "its name"` an
 
 What protects the person is approvals, not a mode:
 
-- **Solo** (the person alone in their room): bots take control of the tab they were given without asking.
-  The person asked for the job.
-- **Multiplayer** (other people in the room): a bot asks "Let … control this tab?" before it clicks or types
-  in a tab, because others may be looking at it.
-- **Always**, solo or not: a bot asks before anything that sends, posts, buys, deletes, connects, follows,
+- Bots take control of the tab they were given without asking: the person asked for the job, and this
+  browser is theirs alone.
+- **Always**: a bot asks before anything that sends, posts, buys, deletes, connects, follows,
   applies, or opens a site with data from the page, and before pressing Enter outside a search box.
 - Bots never type passwords, card numbers or codes. If a site needs signing in, the bot stops and the person
   signs in, then you try again.

@@ -30,13 +30,6 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 
 .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border);
        background: var(--surface); }
-button.room-pill { border: 0; cursor: text; }
-input.room-pill { border: 1px solid var(--amber-line); outline: none; font: inherit; font-size: 11px; width: 120px; }
-.room-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--amber-tint); color: var(--amber-ink);
-             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-.faces { display: flex; }
-.faces span { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--surface); margin-left: -5px; }
-.faces span:first-child { margin-left: 0; }
 .icon { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 8px;
         background: transparent; color: var(--muted); }
 .icon:hover { background: var(--tint); color: var(--text); }
@@ -149,12 +142,11 @@ body.in-history .claude-bar { display: none !important; }
 .status-card small, .check small, .field small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--alert); flex: none; }
 .dot.on { background: #22c55e; }
-#setup, #roomBox { display: flex; flex-direction: column; gap: 10px; }
+#setup, #modesBox { display: flex; flex-direction: column; gap: 10px; }
 .section-label { margin: 6px 0 0; padding-top: 10px; border-top: 1px solid var(--border); color: var(--muted); }
 .wide { width: 100%; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-weight: 500; }
 .wide:hover { background: var(--tint); }
 .wide.primary { background: var(--amber); border-color: var(--amber); color: #412402; }
-.wide.share { background: #1D9E75; border-color: #1D9E75; color: #fff; }
 .check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
 .check input { margin-top: 3px; accent-color: var(--amber); }
 .check span, .field { display: flex; flex-direction: column; gap: 2px; font-weight: 500; }

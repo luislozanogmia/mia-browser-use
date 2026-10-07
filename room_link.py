@@ -32,8 +32,8 @@ class RoomLink:
     ):
         if not url.startswith(("ws://", "wss://")):
             raise ValueError("room url must start with ws:// or wss://")
-        if url.startswith("ws://") and not re.match(r"^ws://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)", url):
-            raise ValueError("Use wss:// for a room that is not on this machine")
+        if not re.match(r"^ws://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)", url):
+            raise ValueError("The relay runs on this machine only (ws://127.0.0.1)")
         self.url = url
         self.room = room
         self.key = key

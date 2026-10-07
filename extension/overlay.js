@@ -333,9 +333,6 @@
       if (globalThis.__ghostMote) marker.style.setProperty("--mote-img", `url("${globalThis.__ghostMote}")`);
       marker.style.setProperty("--hue", `${moteHue(color)}deg`);
     }
-    if (!human && typeof spec.owner_color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(spec.owner_color)) {
-      marker.style.setProperty("--ring", spec.owner_color);
-    }
     const list = layer();
     list.append(ring, marker, label);
     return { ring, marker, label };
@@ -448,10 +445,9 @@
 
   // -- Suggestions: a bot proposes, a human accepts or rejects --------------
 
-  // "luis's Upwork bot" for a bot named after its site, else "Ledger · luis's bot".
-  function botTitle(name, owner) {
-    if (!owner) return name;
-    return /\bbot( \d+)?$/i.test(name) ? `${owner}'s ${name}` : `${name} · ${owner}'s bot`;
+  // The bot's own name: "Upwork bot". One person uses this browser, so no owner is shown.
+  function botTitle(name) {
+    return name;
   }
 
   const cards = new Map(); // suggestion id -> {spec, anchor, node, ring}

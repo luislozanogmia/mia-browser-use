@@ -50,7 +50,7 @@ class Browser:
     def actions(self):
         return [(c, a) for c, a in self.calls if c != "ghost_show"]
 
-def make_hub(scripts, plan=None, others=False):
+def make_hub(scripts, plan=None):
     states, sessions, made = [], [], []
 
     def session(model, system, effort):
@@ -69,8 +69,6 @@ def make_hub(scripts, plan=None, others=False):
     browser = Browser()
     hub = ChatHub(browser, push, session=session, plan=planner)
     hub.made = made
-    if others:  # someone else is in the room: multiplayer
-        hub.room = lambda: {"name": "r", "others": 1}
     hub.claude_status = lambda fresh=False: {"installed": True, "signed_in": True}
     return hub, browser, states, sessions
 
@@ -116,7 +114,7 @@ def test_do_waits_for_approval_before_a_risky_click():
             {"tool": "ghost_read", "args": {}},
             {"note": "sending", "tool": "ghost_click", "args": {"choice": 1}},
             {"done": "Sent."},
-        ]], plan={"reply": "On it.", "tasks": [{"title": "Send it", "goal": "Send the draft", "url": ""}]}, others=True)
+        ]], plan={"reply": "On it.", "tasks": [{"title": "Send it", "goal": "Send the draft", "url": ""}]})
         await hub.handle(send("send my draft", mode="do"))
         for _ in range(50):
             task = next(iter(hub.tasks.values()))
@@ -155,7 +153,7 @@ def test_rejected_action_never_runs():
             {"tool": "ghost_read", "args": {}},
             {"tool": "ghost_click", "args": {"choice": 3}, "confirm": "Go to the next page?"},
             {"done": "Left it."},
-        ]], plan={"tasks": [{"title": "Page", "goal": "next page", "url": ""}]}, others=True)
+        ]], plan={"tasks": [{"title": "Page", "goal": "next page", "url": ""}]})
         await hub.handle(send("next", mode="do"))
         task = next(iter(hub.tasks.values()))
         for _ in range(50):
@@ -274,7 +272,7 @@ def test_one_agent_per_tab_holds_selection_and_chat_tasks():
         assert tasks[0].agent is tasks[1].agent is not tasks[2].agent
         agent = tasks[0].agent
         assert (agent.name, agent.host, agent.tab_id) == ("Pets bot", "pets.example", 5)
-        assert agent.id == "luis-mia-1"
+        assert agent.id == "mia-1"
         assert tasks[0].title == "Explain “cats are great…”" and tasks[1].title == "And dogs?"
         assert [t.status for t in tasks[:2]] == ["done", "done"]
         assert tasks[0].result == "Cats. They purr."
@@ -282,7 +280,7 @@ def test_one_agent_per_tab_holds_selection_and_chat_tasks():
         assert len(bots) == 2 and sorted(b.calls for b in bots) == [[("a1", 5), ("a2", 5)], [("a3", 9)]]
         last = states[-1]
         assert [a["name"] for a in last["agents"]] == ["Pets bot", "Other bot"]
-        assert {t["agent"] for t in last["tasks"]} == {"luis-mia-1", "luis-mia-2"}
+        assert {t["agent"] for t in last["tasks"]} == {"mia-1", "mia-2"}
     asyncio.run(run())
 
 

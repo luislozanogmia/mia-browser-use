@@ -417,12 +417,5 @@
     return { typed: true, characters: String(text).length, tag: el.tagName.toLowerCase(), anchor: anchorOf(el) };
   }
 
-  /** Where the human is working in this page, for their presence. */
-  function humanFocus() {
-    const el = document.activeElement;
-    if (!el || el === document.body || el === document.documentElement) return null;
-    return anchorOf(el);
-  }
-
-  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
+  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, build: globalThis.__ghostBuild };
 })();

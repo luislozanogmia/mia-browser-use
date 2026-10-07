@@ -37,7 +37,7 @@ HEALTHY_SECONDS = 30.0  # a child that ran this long starts over at the shortest
 
 
 def personal_config() -> dict:
-    """Settings for a fresh install: a room of one's own on this Mac."""
+    """Settings for a fresh install: this person's own relay on this Mac."""
     try:
         user = getpass.getuser()
     except Exception:
@@ -68,13 +68,13 @@ def load_or_create_config() -> dict:
 
 
 def local_relay(config: dict) -> int | None:
-    """The relay port when the room lives on this machine (we run its relay)."""
+    """The relay's port. The relay always runs on this machine: there is no remote room."""
     if "room" not in config:
         return None
-    url = urlparse(config.get("room_url") or f"ws://127.0.0.1:{DEFAULT_RELAY_PORT}")
-    if url.scheme != "ws" or url.hostname not in LOCAL_HOSTS:
-        return None
-    return url.port or 80
+    url = urlparse(config.get("room_url") or "")
+    if url.scheme == "ws" and url.hostname in LOCAL_HOSTS and url.port:
+        return url.port
+    return DEFAULT_RELAY_PORT
 
 
 def children(config: dict) -> list[dict]:

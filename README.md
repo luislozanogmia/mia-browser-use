@@ -52,8 +52,6 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
   still a normal click, and a drag crops.
 - **Reel:** every page and answer is saved as a screenshot, in this browser
   only. **Make PDF** turns it into a report.
-- **Rooms:** share a page with other people and their bots, and see each
-  other's cursors and answers (`mia-browser-use room --help`).
 
 Mia answers with your own Claude account through Claude Code.
 
@@ -98,9 +96,9 @@ TUI, and desktop sessions. Set `page_context: false` to turn it off.
 `ghost_status`, `ghost_tab_list`, `ghost_tab_open`, `ghost_tab_switch`,
 `ghost_tab_close`, `ghost_navigate`, `ghost_vacuum`, `ghost_read`,
 `ghost_pdf_read`, `ghost_click`, `ghost_fill`, `ghost_key`, `ghost_eval`, `ghost_screenshot`,
-`ghost_scroll`, and `ghost_wait`. In Chrome, `ghost_show`, `ghost_suggest` and
-`ghost_room` also let agents show what they're working on, suggest changes the
-person accepts or rejects, and join rooms.
+`ghost_scroll`, and `ghost_wait`. In Chrome, `ghost_show` and `ghost_suggest`
+also let agents show what they're working on and suggest changes the person
+accepts or rejects.
 
 PDF reading is Chrome-only. The other listed commands are shared by Chrome and
 Hermes Desktop.

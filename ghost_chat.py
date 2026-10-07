@@ -497,9 +497,9 @@ class Agent:
     """One agent per tab. It holds every task on that tab (selections, crops, Ask and
     Do from the chat) and does them one at a time, with one mote on the page."""
 
-    def __init__(self, n: int, tab_id: int | None, prefix: str = ""):
+    def __init__(self, n: int, tab_id: int | None):
         self.n = n
-        self.id = f"{prefix}-mia-{n}"[-64:] if prefix else f"mia-{n}"
+        self.id = f"mia-{n}"
         self.name = f"Bot {n}"  # named after its site once it has one (ChatHub.name_agent)
         self.color = COLORS[(n - 1) % len(COLORS)]
         self.tab_id = tab_id
@@ -575,7 +575,7 @@ class ChatHub:
                  push: Callable[[dict], Awaitable[None]], room: Callable[[], dict | None] = lambda: None,
                  session: Callable[[str, str, str], Any] = ClaudeSession,
                  plan: Callable[[str, str], Awaitable[str]] | None = None,
-                 me: Callable[[], str] = lambda: "", make_bot: Callable[[Agent], Any] | None = None,
+                 make_bot: Callable[[Agent], Any] | None = None,
                  retire: Callable[[str], Awaitable[None]] | None = None,
                  store: chat_store.ChatStore | None = None,
                  scripts: automations.AutomationStore | None = None):
@@ -584,7 +584,6 @@ class ChatHub:
         self.scheduler: asyncio.Task | None = None
         self.call, self.push, self.room, self.session = call, push, room, session
         self.retire = retire  # a dropped bot leaves the room too
-        self.me = me  # the person's room id: agent ids must be unique in the room
         self.make_bot = make_bot or self._make_bot
         self.agents: dict[str, Agent] = {}
         self.agent_counter = itertools.count(1)
@@ -595,7 +594,6 @@ class ChatHub:
         self.ids = itertools.count(1)
         self.slots = asyncio.Semaphore(MAX_PARALLEL)
         self.queue_lock = asyncio.Lock()
-        self.owner_color = ""
         self.planning = 0
         self.claude_status = claude_setup.status
         self.claude: dict = {}
@@ -801,8 +799,6 @@ class ChatHub:
         tab_id = tab.get("id") if isinstance(tab.get("id"), int) and not isinstance(tab.get("id"), bool) else None
         open_tabs = await self.open_tabs()
         context = self.context(tab, msg.get("language"), tab_id, open_tabs)
-        if isinstance(msg.get("owner_color"), str) and re.fullmatch(r"#[0-9a-fA-F]{3,8}", msg["owner_color"]):
-            self.owner_color = msg["owner_color"]
         self.say("you", text)
         print(f"[chat] ({run}, {model}) on tab {tab_id}: {text[:80]}")
         with suppress(Exception):
@@ -926,7 +922,7 @@ class ChatHub:
             for agent in self.agents.values():
                 if agent.tab_id == tab_id:
                     return agent
-        agent = Agent(next(self.agent_counter), tab_id, re.sub(r"[^A-Za-z0-9_.:-]", "", self.me() or "")[:40])
+        agent = Agent(next(self.agent_counter), tab_id)
         agent.host = _host(url)
         self.name_agent(agent)
         self.agents[agent.id] = agent
@@ -1299,11 +1295,6 @@ class ChatHub:
         args = {k: v for k, v in args.items() if k not in {"tab_id", "actor_id", "human_ok", "script", "password"}}
         return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id, "human_ok": True}
 
-    def others_here(self) -> bool:
-        """Other people are in the room (multiplayer), not just this person and their bots."""
-        room = self.room() or {}
-        return bool(room.get("others"))
-
     async def wait_for_approval(self, task: Task, question: str, choice: Any = None) -> bool:
         """Ask the person on the page and in the panel; True when they approve."""
         task.status, task.question = "needs_you", question
@@ -1386,8 +1377,6 @@ class ChatHub:
         """The worker's mote on its tab: its color, its name, and what it's doing."""
         args = {"label": label or f"{task.label} · {task.title}"[:80], "color": task.color, "kind": "bot",
                 "status": status or "done", "ttl_ms": 600000 if status == "working" else 15000}
-        if self.owner_color:
-            args["owner_color"] = self.owner_color
         if isinstance(choice, int):
             args["choice"] = choice
         with suppress(Exception):
@@ -1774,7 +1763,6 @@ class ChatHub:
             raise StepFailed(1, {"do": "open", "url": url}, f"needs a web address (https://…), got “{_text(url, 60)}”")
         if not task.own_tab or task.tab_id is None:
             await self.move_to_own_tab(task, url)
-        task.control_approved, task.control_url = False, ""
 
     async def approve_urls(self, task: Task, urls: list[str]) -> bool:
         """A script a bot wrote or was handed opens addresses a model chose: the person checks each one

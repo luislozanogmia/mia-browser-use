@@ -71,11 +71,12 @@ class SupervisorTests(unittest.TestCase):
             self.make(held={9377, 9390}).tick()
         self.assertEqual(self.spawned, [])
 
-    def test_remote_room_runs_no_relay(self):
+    def test_the_relay_always_runs_here(self):
+        # There is no remote room: a saved remote address still gets the local relay.
         config = {**ROOM, "room_url": "wss://rooms.example.com"}
         with mock.patch.object(native_host, "wait_listening", return_value=True):
             self.make(config).tick()
-        self.assertNotIn(["room", "serve"], [args[:2] for args, _ in self.spawned])
+        self.assertIn(["room", "serve"], [args[:2] for args, _ in self.spawned])
 
     def test_stop_terminates_children(self):
         with mock.patch.object(native_host, "wait_listening", return_value=True):

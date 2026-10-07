@@ -76,7 +76,6 @@ chrome.runtime.onMessage.addListener(msg => {
 
 function render(next) {
   state = next;
-  renderRoom(state.room);
   renderModels(state.models);
   renderLog(state.messages || []);
   renderTasks(state.tasks || [], state.agents || []);
@@ -99,30 +98,6 @@ function renderClaude(claude) {
     : "Mia answers with your Claude account. Sign in once and you're set.";
   $("claudeBtn").hidden = Boolean(busy);
   $("claudeBtn").textContent = claude.installed ? "Sign in to Claude" : "Set up Claude";
-}
-
-// What the room is called in this panel. Only a label: the room itself (what others join) keeps its id.
-let roomNames = {};
-let renaming = false;
-const roomLabel = room => roomNames[room.name] || "Room 1";
-
-function renderRoom(room) {
-  if (renaming) return;  // the pill is a text box right now
-  const pill = $("room"), faces = $("faces");
-  pill.hidden = !room;
-  faces.replaceChildren();
-  if (!room) return;
-  const people = room.members || [];
-  // People and bots counted apart: "1 person · 2 bots", not "3 here".
-  const humans = people.filter(m => m.kind !== "bot").length, bots = people.length - humans;
-  pill.textContent = `${roomLabel(room)} · ${humans} ${humans === 1 ? "person" : "people"}` +
-    (bots ? ` · ${bots} bot${bots === 1 ? "" : "s"}` : "");
-  pill.title = `Room “${room.name}”. Click to rename it here.`;
-  for (const m of people.slice(0, 6)) {
-    const dot = el("span", { title: m.name });
-    dot.style.background = /^#[0-9a-fA-F]{3,8}$/.test(m.color) ? m.color : "#B4B2A9";
-    faces.append(dot);
-  }
 }
 
 function renderModels(models) {
@@ -304,34 +279,6 @@ input.addEventListener("keydown", event => {
   }
 });
 $("stopAll").addEventListener("click", () => chat("stop_all"));
-// Click the room's name to rename it: Enter or clicking away saves, Esc cancels.
-$("room").addEventListener("click", () => {
-  const room = state?.room;
-  if (!room || renaming) return;
-  renaming = true;
-  const pill = $("room");
-  const box = el("input", { className: "room-pill", value: roomLabel(room), maxLength: 40, ariaLabel: "Room name" });
-  let done = false;
-  const finish = save => {
-    if (done) return;
-    done = true;
-    const name = box.value.trim();
-    if (save && name) {
-      roomNames = { ...roomNames, [room.name]: name };
-      chrome.storage.local.set({ roomNames });
-    }
-    box.replaceWith(pill);
-    renaming = false;
-    renderRoom(state?.room);
-  };
-  box.addEventListener("keydown", event => {
-    if (event.key === "Enter") finish(true);
-    if (event.key === "Escape") finish(false);
-  });
-  box.addEventListener("blur", () => finish(true));
-  pill.replaceWith(box);
-  box.select();
-});
 // The bots list starts collapsed: just the count until you open it.
 $("tasksToggle").addEventListener("click", () => {
   const open = $("taskRows").hidden;
@@ -627,19 +574,11 @@ function updateSettings(info) {
   // Pairing is automatic; the manual fields only matter when it hasn't worked.
   $("setup").hidden = on;
   $("disconnectBtn").hidden = !on;
-  $("roomBox").hidden = !(on && info.room);
-  $("followMe").checked = Boolean(info.follow);
+  $("modesBox").hidden = !on;
   $("reelMode").checked = Boolean(info.reel);
   $("immersive").checked = Boolean(info.modes?.immersive);
   $("skipPrompt").checked = Boolean(info.modes?.skip);
   if (document.activeElement !== $("language")) $("language").value = info.language || "English";
-  if (info.room) {
-    const count = info.room.shared.length;
-    $("roomLabel").textContent = `In a room as ${info.room.me.name || info.room.me.id} · ${count} shared page${count === 1 ? "" : "s"}`;
-  }
-  // Offer only what applies to this tab.
-  $("shareBtn").hidden = Boolean(info.tab_shared);
-  $("unshareBtn").hidden = !info.tab_shared;
   if (!on) setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
   else if ($("status").textContent.startsWith("Not connected")) setStatus("");
 }
@@ -652,17 +591,11 @@ function refreshSettings() {
 
 function setting(message, delay = 300) {
   $("error").textContent = "";
-  chrome.runtime.sendMessage(message, result => {
-    if (message.type.endsWith("share-tab") && !result?.ok) $("error").textContent = result?.error || "Could not reach the room";
-    setTimeout(refreshSettings, delay);
-  });
+  chrome.runtime.sendMessage(message, () => setTimeout(refreshSettings, delay));
 }
 
 $("openSettings").addEventListener("click", () => toggleSettings($("settings").hidden));
 $("closeSettings").addEventListener("click", () => toggleSettings(false));
-$("shareBtn").addEventListener("click", () => setting({ type: "share-tab" }, 500));
-$("unshareBtn").addEventListener("click", () => setting({ type: "unshare-tab" }, 500));
-$("followMe").addEventListener("change", () => setting({ type: "follow", on: $("followMe").checked }, 500));
 $("reelMode").addEventListener("change", () => setting({ type: "reel", on: $("reelMode").checked }));
 for (const id of ["immersive", "skipPrompt"]) {
   $(id).addEventListener("change", () => setting({ type: "modes", immersive: $("immersive").checked, skip: $("skipPrompt").checked }));
@@ -680,18 +613,16 @@ $("connectBtn").addEventListener("click", () => {
     setTimeout(() => { refreshSettings(); if (connected) chat("sync"); }, 500);
   });
 });
-// The share button and the connection dot follow the tab and the bridge.
-chrome.tabs.onActivated.addListener(refreshSettings);
+// The connection dot follows the bridge.
 setInterval(refreshSettings, 5000);
 
 // -- start --------------------------------------------------------------------------------
 
 (async () => {
-  const stored = await chrome.storage.local.get(["chatPrefs", "roomNames", "playInputs"]);
+  const stored = await chrome.storage.local.get(["chatPrefs", "playInputs"]);
   for (const [id, values] of Object.entries(stored.playInputs || {})) {
     if (values && typeof values === "object") playInputs.set(id, values);
   }
-  roomNames = stored.roomNames && typeof stored.roomNames === "object" ? stored.roomNames : {};
   const saved = stored.chatPrefs || {};
   if (saved.model) prefs.model = String(saved.model);
   renderChips();

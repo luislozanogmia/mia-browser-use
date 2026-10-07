@@ -156,8 +156,8 @@ async function connect() {
     }
     if (!connected) return;
     if (msg.type === "shared_pages") {
-      await setSharedPages(msg.urls, msg.me);
-      followActiveTab();
+      await setSharedPages(msg.urls);
+      shareOpenTabs();
       return;
     }
     if (!msg.id || !msg.command) return;
@@ -1313,13 +1313,12 @@ async function drawSuggestion(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Room: which pages are shared, and where the local human is working on them
+// Shared pages: every open http(s) tab is shared with the local relay while it
+// is open (one bot per tab); it is unshared when its tab closes. The relay's
+// list is mirrored here so the page scripts only run where asking works.
 // ---------------------------------------------------------------------------
 
 let sharedPages = new Set();
-const manuallyShared = new Set(); // shared from the side panel, kept when following moves on
-const stoppedByHuman = new Set(); // unshared from the side panel, so following leaves them alone
-let roomMe = null;
 
 // Same rule as ghost_room.page_key: origin + path, no query or fragment.
 function pageKey(url) {
@@ -1373,10 +1372,9 @@ async function untrackHuman(tabId) {
   }).catch(() => {});
 }
 
-async function setSharedPages(urls, me) {
+async function setSharedPages(urls) {
   const before = sharedPages;
   sharedPages = new Set(Array.isArray(urls) ? urls : []);
-  roomMe = me && typeof me === "object" ? me : null;
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
     const key = pageKey(tab.url);
@@ -1393,47 +1391,42 @@ async function setSharedPages(urls, me) {
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (info.status !== "complete" || !connected || !ws) return;
   ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
+  shareTab(tab);
   if (isShared(tab.url)) await trackHuman(tabId);
 });
 
 // ---------------------------------------------------------------------------
-// Follow me: keep the tab the human is looking at shared with the room
+// Automatic sharing: the page in each open tab, for as long as the tab is open
 // ---------------------------------------------------------------------------
 
-let following = false;
-let followedUrl = null; // shared by following, so following may unshare it
+const tabPages = new Map(); // tab id -> page key it currently shares
 
-async function followActiveTab() {
-  if (!following || !connected) return;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const key = tab && pageKey(tab.url);
-  if (!key || (key === followedUrl && sharedPages.has(key))) return;
-  if (stoppedByHuman.has(key)) {
-    // The human stopped sharing this page; following doesn't share it again.
-    if (followedUrl && followedUrl !== key && !manuallyShared.has(followedUrl)) toBridge({ type: "unshare", url: followedUrl });
-    followedUrl = null;
-    return;
-  }
-  // Leave the last followed page, unless the human shared it themselves.
-  if (followedUrl && !manuallyShared.has(followedUrl)) toBridge({ type: "unshare", url: followedUrl });
-  followedUrl = key;
+function shareTab(tab) {
+  if (!tab || !Number.isInteger(tab.id)) return;
+  const key = pageKey(tab.url);
+  const before = tabPages.get(tab.id);
+  if (before && before !== key) leavePage(tab.id, before);
+  if (!key) return;
+  tabPages.set(tab.id, key);
   if (!sharedPages.has(key)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, title: tab.title });
 }
 
-async function setFollow(on) {
-  following = on;
-  await chrome.storage.local.set({ follow: on });
-  if (on) {
-    followActiveTab();
-  } else {
-    if (followedUrl && !manuallyShared.has(followedUrl)) toBridge({ type: "unshare", url: followedUrl });
-    followedUrl = null;
-  }
+// A tab left a page (closed or moved on): unshare it unless another tab still shows it.
+function leavePage(tabId, key) {
+  tabPages.delete(tabId);
+  for (const other of tabPages.values()) if (other === key) return;
+  toBridge({ type: "unshare", url: key });
 }
 
-chrome.tabs.onActivated.addListener(() => followActiveTab());
-chrome.windows.onFocusChanged.addListener(id => { if (id !== chrome.windows.WINDOW_ID_NONE) followActiveTab(); });
-chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active) followActiveTab(); });
+async function shareOpenTabs() {
+  if (!connected) return;
+  for (const tab of await chrome.tabs.query({})) shareTab(tab);
+}
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  const key = tabPages.get(tabId);
+  if (key) leavePage(tabId, key);
+});
 
 // ---------------------------------------------------------------------------
 // Reel mode: a screenshot of every shared page the human visits and of every
@@ -1573,7 +1566,7 @@ async function chatFromPanel(msg) {
       // The panel has no Ask/Do switch: Mia decides. A mode sent explicitly still binds her.
       text: String(msg.text || "").slice(0, 2000), mode: ["ask", "do"].includes(msg.mode) ? msg.mode : "auto",
       run: msg.run === "queue" ? "queue" : "parallel", model: String(msg.model || "").slice(0, 60),
-      tab: await chatTab(), language, owner_color: roomMe?.color || "",
+      tab: await chatTab(), language,
     });
   }
   toBridge({ type: "chat", chat });
@@ -1598,7 +1591,7 @@ chrome.commands?.onCommand.addListener(async (command, tab) => {
       target: { tabId: tab.id },
       func: (mode, ok) => {
         const overlay = globalThis.__ghostOverlay;
-        if (!ok) return overlay?.toast?.("Share this page with the room to ask about it");
+        if (!ok) return overlay?.toast?.("Mia can't ask about this page yet. Reload it and try again");
         if (mode === "crop-ask") overlay?.startCrop();
         else overlay?.askSelection();
       },
@@ -1610,8 +1603,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "get-status") {
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       sendResponse({
-        ...getStatus(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isShared(tab.url)),
-        room: roomMe ? { me: roomMe, shared: [...sharedPages] } : null,
+        ...getStatus(), reel: reelOn, modes, language, tab_shared: Boolean(tab && isShared(tab.url)),
       });
     });
     return true;
@@ -1620,11 +1612,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "sheet-columns" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
     sheetColumns(String(msg.sheet || "")).then(sendResponse, error => sendResponse({ error: String(error?.message || error) }));
     return true;
-  }
-  // From the human tracker in a shared page.
-  if (msg.type === "human_presence" && sender.tab && isShared(sender.tab.url)) {
-    toBridge({ type: "human", tab_id: sender.tab.id, url: sender.tab.url, status: msg.status, focus: msg.focus, pointer: msg.pointer });
-    return false;
   }
   // A human clicked Accept or Reject on a suggestion card.
   if (msg.type === "resolve" && sender.tab && typeof msg.id === "string") {
@@ -1677,7 +1664,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "chat-last" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
-    sendResponse({ state: chatState, connected: Boolean(connected), room: roomMe ? { me: roomMe } : null });
+    sendResponse({ state: chatState, connected: Boolean(connected) });
     return false;
   }
   // The reel page wants the words for its PDF: the bridge asks a model.
@@ -1702,29 +1689,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ? chrome.tabs.update(open.id, { active: true }).then(() => chrome.windows.update(open.windowId, { focused: true }))
       : chrome.tabs.create({ url })));
     return false;
-  }
-  // From the side panel: share the tab the human is on, wherever they go.
-  if (msg.type === "follow") {
-    setFollow(Boolean(msg.on)).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  // From the side panel: share or stop sharing the current tab with the room.
-  if (msg.type === "share-tab" || msg.type === "unshare-tab") {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (!tab || !pageKey(tab.url)) return sendResponse({ ok: false, error: "Only http(s) pages can be shared" });
-      toBridge({ type: msg.type === "share-tab" ? "share" : "unshare", tab_id: tab.id, url: tab.url, title: tab.title });
-      const key = pageKey(tab.url);
-      if (msg.type === "share-tab") {
-        manuallyShared.add(key);
-        stoppedByHuman.delete(key);
-      } else {
-        manuallyShared.delete(key);
-        stoppedByHuman.add(key);
-        if (followedUrl === key) followedUrl = null;
-      }
-      sendResponse({ ok: true, url: pageKey(tab.url) });
-    });
-    return true;
   }
   if (msg.type === "connect") {
     port = msg.port || DEFAULT_PORT;
@@ -1760,9 +1724,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Startup
 // ---------------------------------------------------------------------------
 
-chrome.storage.local.get(["port", "token", "follow", "reel", "modes", "language"], (data) => {
+chrome.storage.local.get(["port", "token", "reel", "modes", "language"], (data) => {
   language = cleanLanguage(data.language);
-  following = Boolean(data.follow);
   if (data.modes) modes = { immersive: Boolean(data.modes.immersive), skip: Boolean(data.modes.skip) };
   reelOn = Boolean(data.reel);
   if (data.port) port = data.port;

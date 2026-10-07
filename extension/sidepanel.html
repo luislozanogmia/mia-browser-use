@@ -8,8 +8,6 @@
 </head>
 <body>
   <header class="top">
-    <button class="room-pill" id="room" hidden></button>
-    <span class="faces" id="faces"></span>
     <button class="icon play-btn" id="openPlays" title="Play Automations" aria-label="Play Automations" aria-expanded="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>
     </button>
@@ -38,16 +36,12 @@
     </div>
     <p class="error" id="error"></p>
 
-    <div id="roomBox">
-      <p class="section-label" id="roomLabel"></p>
-      <button class="wide share" id="shareBtn">Share this tab with the room</button>
-      <button class="wide" id="unshareBtn">Stop sharing this tab</button>
-      <label class="check"><input type="checkbox" id="followMe">
-        <span>Follow me<small>Bots come with you: the tab you're on is shared with the room as you move. Everyone in the room sees those pages.</small></span></label>
+    <div id="modesBox">
+      <p class="section-label">On the page</p>
       <label class="check"><input type="checkbox" id="reelMode">
-        <span>Reel mode<small>Every shared page you visit and every answer a bot gives is saved as a screenshot, one below the other.</small></span></label>
+        <span>Reel mode<small>Every page you visit and every answer a bot gives is saved as a screenshot, one below the other.</small></span></label>
       <label class="check"><input type="checkbox" id="immersive">
-        <span>Immersive mode<small>Drag anywhere on a shared page to ask about it, again and again. Clicks and scrolling still work. Esc pauses.</small></span></label>
+        <span>Immersive mode<small>Drag anywhere on a page to ask about it, again and again. Clicks and scrolling still work. Esc pauses.</small></span></label>
       <label class="check"><input type="checkbox" id="skipPrompt">
         <span>Skip the question<small>Crop or select text and the bot explains it right away, no question box.</small></span></label>
       <button class="wide" id="openReel">Open the reel</button>

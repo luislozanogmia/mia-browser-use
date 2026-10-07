@@ -1390,7 +1390,15 @@ async function setSharedPages(pages, me) {
 
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (!connected || !ws) return;
-  if (acceptedSharedTabs.has(tabId) && acceptedSharedTabs.get(tabId).url !== tab.url) setRoomAccess(tab, false);
+  const entry = acceptedSharedTabs.get(tabId);
+  if (entry && entry.url !== tab.url) {
+    setRoomAccess(tab, false);
+    // Went to another page: the old one is no longer open here.
+    if (pageKey(entry.url) !== pageKey(tab.url)) {
+      unshareLeftPage(tabId, entry);
+      if (manuallyShared.get(tabId) === pageKey(entry.url)) manuallyShared.delete(tabId);
+    }
+  }
   if (info.status !== "complete") return;
   if (isAcceptedTab(tab)) {
     ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
@@ -1544,11 +1552,25 @@ function toBridge(message) {
 }
 
 // A closed tab takes its bot off Mia's list, whether or not the panel is open.
+// A page this browser shared stops being shared once no tab here shows it any
+// more; otherwise closed tabs stay listed in the room until it is full.
+function unshareLeftPage(tabId, entry) {
+  if (!entry || sharedPageDetails.get(entry.roomUrl)?.by !== roomMe?.id) return;
+  const stillOpen = [...acceptedSharedTabs].some(([id, other]) => id !== tabId && other.roomUrl === entry.roomUrl);
+  if (!stillOpen) toBridge({ type: "unshare", tab_id: tabId, url: entry.roomUrl });
+}
+
 chrome.tabs.onRemoved.addListener(tabId => {
   if (acceptedSharedTabs.has(tabId)) {
-    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId).url,
-               room_url: acceptedSharedTabs.get(tabId).roomUrl, accepted: false });
+    const entry = acceptedSharedTabs.get(tabId);
+    toBridge({ type: "room_access", tab_id: tabId, url: entry.url,
+               room_url: entry.roomUrl, accepted: false });
     acceptedSharedTabs.delete(tabId);
+    unshareLeftPage(tabId, entry);
+  }
+  manuallyShared.delete(tabId);
+  if (followedTabId === tabId) {
+    followedUrl = null; followedTabId = null; followedRoomUrl = null;
   }
   toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
 });

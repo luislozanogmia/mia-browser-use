@@ -235,6 +235,14 @@ def _text(value: Any, limit: int) -> str:
     return " ".join(str(value).split())[:limit] if isinstance(value, (str, int, float)) else ""
 
 
+def _lines(value: Any, limit: int) -> str:
+    """An answer for a card: line breaks stay (bullets and paragraphs), runs of spaces don't."""
+    if not isinstance(value, (str, int, float)):
+        return ""
+    lines = [" ".join(line.split()) for line in str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:limit]
+
+
 def _typed(value: Any) -> str:
     """What the person wrote for a box, exactly: line breaks and blank lines stay (a message's format)."""
     if not isinstance(value, (str, int, float)):
@@ -1281,7 +1289,7 @@ class ChatHub:
         body = (f"{waiting} Approve or reject it in Mia's side panel." if waiting else task.result)
         try:
             await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
-                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
+                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _lines(body, 600)})
         except Exception as exc:
             print(f"[chat] couldn't update the card for {task.id}: {exc}")
 

@@ -808,3 +808,10 @@ def test_alone_a_bot_takes_the_tab_without_asking():
         clicks = [a for c, a in browser.calls if c == "ghost_click"]
         assert clicks and clicks[0]["human_ok"] is True
     asyncio.run(main())
+
+
+def test_an_answer_card_keeps_its_line_breaks():
+    from ghost_chat import _lines
+    text = "Here it is:\n\n\n- **Profile:**   Luis Lozano\n- Stats: 938 viewers\r\nDone."
+    assert _lines(text, 600) == "Here it is:\n\n- **Profile:** Luis Lozano\n- Stats: 938 viewers\nDone."
+    assert _lines(None, 600) == ""

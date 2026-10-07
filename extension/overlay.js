@@ -99,7 +99,10 @@
     .conv .turn { margin: 0 0 8px; }
     .conv .turn .quote { margin: 0 0 4px; }
     .conv .turn .a-title { font-weight: 600; margin: 0 0 2px; }
-    .conv .turn .a-body { margin: 0; }
+    .conv .turn .a-body { margin: 0 0 6px; }
+    .card ul { margin: 0 0 8px; padding-left: 18px; color: #333; }
+    .card li { margin: 0 0 3px; }
+    .card code { font: 12px/1.4 ui-monospace, Menlo, monospace; background: #f1f3f5; padding: 0 4px; border-radius: 4px; }
     .conv textarea { width: 100%; box-sizing: border-box; font: inherit; border: 1px solid #ccc; border-radius: 6px;
                      padding: 5px 6px; resize: none; }
     .crop-hint { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); pointer-events: none;
@@ -592,9 +595,7 @@
     heading.style.fontWeight = "600";
     parts.push(heading);
     if (spec.body) {
-      const body = document.createElement("p");
-      body.textContent = String(spec.body).slice(0, 600);
-      parts.push(body);
+      parts.push(...markdownBlocks(String(spec.body).slice(0, 600), ""));
     }
     if (kind === "edit") {
       // Only a proposed change needs a decision.
@@ -657,6 +658,40 @@
   }
 
   const here = () => roomHref(location.href);
+
+  // A bot's answer is short markdown: paragraphs, "- " bullets, **bold** and `code`. Built as nodes, never as HTML.
+  function inlineMarkdown(text, into) {
+    const re = /\*\*([^*]+)\*\*|`([^`]+)`/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) into.append(text.slice(last, m.index));
+      into.append(Object.assign(document.createElement(m[1] ? "strong" : "code"), { textContent: m[1] || m[2] }));
+      last = re.lastIndex;
+    }
+    if (last < text.length) into.append(text.slice(last));
+  }
+
+  function markdownBlocks(text, className) {
+    const blocks = [];
+    let list = null;
+    for (const raw of String(text).split("\n")) {
+      const line = raw.trim();
+      if (!line) { list = null; continue; }
+      const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+      if (bullet) {
+        if (!list) blocks.push(list = Object.assign(document.createElement("ul"), { className }));
+        const item = document.createElement("li");
+        inlineMarkdown(bullet[1], item);
+        list.append(item);
+      } else {
+        list = null;
+        const p = Object.assign(document.createElement("p"), { className });
+        inlineMarkdown(line.replace(/^#{1,6}\s+/, ""), p);
+        blocks.push(p);
+      }
+    }
+    return blocks;
+  }
 
   function showIfHere(card) {
     const href = typeof card.spec.href === "string" ? roomHref(card.spec.href) : "";
@@ -761,7 +796,7 @@
       box.append(Object.assign(document.createElement("p"), { className: "quote", textContent: `${turn.by ? `${turn.by}: ` : ""}“${turn.q}”` }));
       if (turn.a) {
         box.append(Object.assign(document.createElement("p"), { className: "a-title", textContent: turn.a.title }));
-        if (turn.a.body) box.append(Object.assign(document.createElement("p"), { className: "a-body", textContent: turn.a.body }));
+        if (turn.a.body) box.append(...markdownBlocks(turn.a.body, "a-body"));
       } else {
         const waiting = Object.assign(document.createElement("p"), { className: "waiting",
           textContent: turn.stopping ? "Stopping…" : "Waiting for a bot to answer…" });

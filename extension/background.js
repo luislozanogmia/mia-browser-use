@@ -51,7 +51,7 @@ function constantTimeEqual(left, right) {
 // ---------------------------------------------------------------------------
 
 function getStatus() {
-  return { connected, paired: Boolean(token), port, version: chrome.runtime.getManifest().version };
+  return { connected, paired: Boolean(token), helper, installer_url: INSTALLER_URL, port, version: chrome.runtime.getManifest().version };
 }
 
 function setBadge(text, color) {
@@ -64,8 +64,24 @@ function setBadge(text, color) {
 // ---------------------------------------------------------------------------
 
 const NATIVE_HOST = "com.ghost.bridge";
+// Where the Mac installer lives. The extension can't install software itself (Chrome
+// doesn't allow it), so this is the one download a person makes; the installer puts the
+// helper in place and the extension connects by itself a few seconds later.
+const INSTALLER_URL = "https://github.com/luislozanogmia/mia-browser-use/releases/latest/download/Mia-Browser-Use.pkg";
+const SETUP_RETRY_DELAY = 5000;
 let pairing = null;
 let bridgeJustStarted = false;
+// What the last pairing attempt learned about the helper on this computer:
+// "unknown" (never asked), "ok", "missing" (installer never ran), "outdated" (an
+// older helper that doesn't know this extension), "failed" (it ran but didn't answer).
+let helper = "unknown";
+
+function classifyHelperError(message) {
+  const text = String(message || "").toLowerCase();
+  if (text.includes("not found")) return "missing";
+  if (text.includes("forbidden")) return "outdated";
+  return "failed";
+}
 
 // Ask the local Ghost install for the token (see native_host.py). It also
 // starts the bridge when it isn't running. Chrome only lets this extension
@@ -75,6 +91,7 @@ function pairAutomatically() {
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "pair" }, reply => {
         const ok = !chrome.runtime.lastError && reply?.ok && typeof reply.token === "string" && reply.token.length >= 32;
+        helper = ok ? "ok" : classifyHelperError(chrome.runtime.lastError?.message || reply?.error);
         bridgeJustStarted = Boolean(ok && reply.bridge === "started");
         if (ok && reply.token !== token) {
           token = reply.token;
@@ -93,7 +110,10 @@ function pairAutomatically() {
 async function connect() {
   if (!token && !(await pairAutomatically())) {
     setBadge("PAIR", "#f59e0b");
-    scheduleReconnect(); // try again once Ghost is installed
+    // Keep asking every few seconds: the person is probably running the installer
+    // right now, and the panel should turn green on its own when it finishes.
+    reconnectDelay = SETUP_RETRY_DELAY;
+    scheduleReconnect();
     return;
   }
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
@@ -809,9 +829,11 @@ async function fetchPdf(args) {
 
 // A new id each time the extension is installed or reloaded. Pages keep the
 // scripts an older copy injected; the new scripts see the id change and replace them.
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(details => {
   buildId = Promise.resolve(String(Date.now()));
   chrome.storage.local.set({ build: String(Date.now()) });
+  // First install (from the store or unpacked): show the one remaining step.
+  if (details?.reason === "install") chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
 });
 let buildId = chrome.storage.local.get("build").then(data => data.build || "0");
 

@@ -6,9 +6,13 @@
 #
 #   packaging/build-pkg.sh
 #
+# The extension's id is fixed by the key in extension/manifest.json, so the same id
+# covers the unpacked copy, the Chrome Web Store version and this package. The
+# package registers that id with Chrome ("External Extensions"), so Chrome offers the
+# store version by itself on its next start; people who added Mia from the store
+# first just see the panel turn green.
+#
 # Optional environment:
-#   GHOST_WEB_STORE_ID   the extension's Chrome Web Store id. Chrome then offers the
-#                        extension by itself, and the store version may start Ghost.
 #   GHOST_SIGN_APP       "Developer ID Application: ..." identity, signs the bundled programs.
 #   GHOST_SIGN_INSTALLER "Developer ID Installer: ..." identity, signs the .pkg.
 #   GHOST_NOTARY_PROFILE notarytool keychain profile; notarizes and staples the .pkg.
@@ -50,14 +54,10 @@ LAUNCH
 chmod 755 "$STAGE/native-host"
 cp "$HERE/uninstall.sh" "$STAGE/uninstall.sh" && chmod 755 "$STAGE/uninstall.sh"
 
-# Which extensions may start the helper: the copy loaded from the installed folder,
-# and the Chrome Web Store version when its id is known.
-UNPACKED_ID="$(cd "$REPO" && "$PY" -c "from pathlib import Path; from native_host import extension_id; print(extension_id(Path('$GHOST/app/extension')))")"
-ORIGINS="\"chrome-extension://$UNPACKED_ID/\""
-if [ -n "${GHOST_WEB_STORE_ID:-}" ]; then
-  [[ "$GHOST_WEB_STORE_ID" =~ ^[a-p]{32}$ ]] || { echo "GHOST_WEB_STORE_ID must be 32 letters a-p" >&2; exit 1; }
-  ORIGINS="$ORIGINS, \"chrome-extension://$GHOST_WEB_STORE_ID/\""
-fi
+# Which extension may start the helper: the one id the manifest key fixes.
+EXT_ID="$(cd "$REPO" && "$PY" -c "from pathlib import Path; from native_host import extension_id; print(extension_id(Path('extension')))")"
+[[ "$EXT_ID" =~ ^[a-p]{32}$ ]] || { echo "bad extension id: $EXT_ID" >&2; exit 1; }
+ORIGINS="\"chrome-extension://$EXT_ID/\""
 for dir in "Google/Chrome" "Chromium" "BraveSoftware/Brave-Browser" "Microsoft Edge"; do
   case "$dir" in Google/Chrome) target="$ROOT/Library/Google/Chrome/NativeMessagingHosts" ;;
                  *) target="$ROOT/Library/Application Support/$dir/NativeMessagingHosts" ;; esac
@@ -73,12 +73,10 @@ for dir in "Google/Chrome" "Chromium" "BraveSoftware/Brave-Browser" "Microsoft E
 JSON
 done
 
-# With a store id, Chrome offers the extension by itself on next start.
-if [ -n "${GHOST_WEB_STORE_ID:-}" ]; then
-  ext="$ROOT/Library/Application Support/Google/Chrome/External Extensions"
-  mkdir -p "$ext"
-  echo '{"external_update_url": "https://clients2.google.com/service/update2/crx"}' > "$ext/$GHOST_WEB_STORE_ID.json"
-fi
+# Chrome offers the store version of the extension by itself on its next start.
+ext="$ROOT/Library/Application Support/Google/Chrome/External Extensions"
+mkdir -p "$ext"
+echo '{"external_update_url": "https://clients2.google.com/service/update2/crx"}' > "$ext/$EXT_ID.json"
 
 if [ -n "${GHOST_SIGN_APP:-}" ]; then
   echo "→ Signing bundled programs"
@@ -102,4 +100,7 @@ if [ -n "${GHOST_NOTARY_PROFILE:-}" ]; then
   xcrun notarytool submit "$OUT" --keychain-profile "$GHOST_NOTARY_PROFILE" --wait
   xcrun stapler staple "$OUT"
 fi
-echo "✓ $OUT ($(du -h "$OUT" | cut -f1))"
+# The extension links to a fixed name on GitHub Releases (.../releases/latest/download/Mia-Browser-Use.pkg).
+cp "$OUT" "$REPO/build/Mia-Browser-Use.pkg"
+echo "✓ $OUT ($(du -h "$OUT" | cut -f1)), also build/Mia-Browser-Use.pkg"
+echo "  extension id: $EXT_ID"

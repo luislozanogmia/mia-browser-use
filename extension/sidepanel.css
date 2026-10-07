@@ -152,6 +152,17 @@ body.in-history .claude-bar { display: none !important; }
 .check span, .field { display: flex; flex-direction: column; gap: 2px; font-weight: 500; }
 .field input { margin-top: 4px; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface);
                color: var(--text); font: inherit; font-weight: 400; }
+.setup-card { display: flex; flex-direction: column; gap: 8px; }
+.setup-card p { margin: 0; color: var(--muted); }
+.setup-card strong { font-size: 14px; }
+.setup-download { display: block; text-align: center; text-decoration: none; }
+.setup-steps { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.setup-steps li { margin: 2px 0; }
+.setup-what, .setup-advanced { font-size: 12px; color: var(--muted); }
+.setup-what summary, .setup-advanced summary { cursor: pointer; }
+.setup-what p { margin: 6px 0 0; }
+.setup-advanced { display: flex; flex-direction: column; gap: 8px; }
+.setup-advanced[open] .field { display: flex; }
 .error { margin: 0; color: var(--alert); font-size: 12px; }
 .error:empty { display: none; }
 .version { margin: 0; text-align: center; color: var(--faint); font-size: 11px; }

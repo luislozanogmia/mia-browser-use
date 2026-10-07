@@ -568,7 +568,8 @@ function updateSettings(info) {
   $("dot").classList.toggle("on", on);
   $("statusLabel").textContent = on ? "Connected" : "Disconnected";
   $("statusDetail").textContent = on ? `Bridge on port ${info.port}`
-    : info.paired ? "Starting Mia Browser on this computer…" : "Run the Mia Browser installer once, and it starts by itself after that";
+    : info.paired ? "Starting Mia on this computer…" : setupDetail(info.helper);
+  renderSetup(info);
   if (document.activeElement !== $("port")) $("port").value = info.port;
   $("version").textContent = `Mia v${info.version}`;
   // Pairing is automatic; the manual fields only matter when it hasn't worked.
@@ -579,8 +580,32 @@ function updateSettings(info) {
   $("immersive").checked = Boolean(info.modes?.immersive);
   $("skipPrompt").checked = Boolean(info.modes?.skip);
   if (document.activeElement !== $("language")) $("language").value = info.language || "English";
-  if (!on) setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
-  else if ($("status").textContent.startsWith("Not connected")) setStatus("");
+  if (!on) setStatus(info.paired || info.helper === "ok" ? "Mia is not running. Close and reopen Chrome, or reload the extension on chrome://extensions"
+    : "Mia isn't set up on this Mac yet. One download finishes it (see above).", true);
+  else if ($("status").textContent.startsWith("Not connected") || $("status").textContent.startsWith("Mia isn't set up")) setStatus("");
+}
+
+function setupDetail(helper) {
+  if (helper === "outdated") return "An older Mia helper is installed; the current installer replaces it";
+  if (helper === "failed") return "The Mia helper didn't answer. Running the installer again fixes it";
+  return "Not set up on this Mac yet";
+}
+
+// The card for the one step the extension can't do itself: the installer.
+function renderSetup(info) {
+  const paired = Boolean(info.paired) || info.helper === "ok";
+  $("setupCard").hidden = paired;
+  $("downloadBtn").href = info.installer_url || "#";
+  if (info.helper === "outdated") {
+    $("setupTitle").textContent = "Update the Mia helper on this Mac";
+    $("setupText").textContent = "This version of Mia needs a newer helper than the one installed. Download the current installer and run it; your chats and settings stay.";
+  } else if (info.helper === "failed") {
+    $("setupTitle").textContent = "The Mia helper isn't answering";
+    $("setupText").textContent = "Running the installer again puts a fresh copy in place. If it still fails, close and reopen Chrome.";
+  } else {
+    $("setupTitle").textContent = "One more step on this Mac";
+    $("setupText").textContent = "Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and this panel connects by itself.";
+  }
 }
 
 function refreshSettings() {

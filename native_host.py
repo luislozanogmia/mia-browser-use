@@ -13,6 +13,7 @@ ghost_eval is never turned on this way.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -178,10 +179,25 @@ def answer(message: dict | None) -> dict:
     return {"ok": True, "token": token, "port": config["port"], "bridge": bridge}
 
 
+def _chrome_id(digest_hex: str) -> str:
+    return "".join(chr(ord("a") + int(c, 16)) for c in digest_hex[:32])
+
+
 def extension_id(extension_dir: Path) -> str:
-    """The id Chrome gives an unpacked extension loaded from this folder."""
-    digest = hashlib.sha256(str(extension_dir.resolve()).encode()).hexdigest()[:32]
-    return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+    """The id Chrome gives the extension in this folder.
+
+    manifest.json carries a fixed public key, so the id is the same whether the
+    extension is loaded unpacked, installed by the Mac package, or comes from the
+    Chrome Web Store (the store keeps the id of an upload that has a key). Without
+    a key, Chrome derives the id from the folder's path instead.
+    """
+    try:
+        key = json.loads((extension_dir / "manifest.json").read_text()).get("key")
+    except (OSError, ValueError):
+        key = None
+    if isinstance(key, str) and key:
+        return _chrome_id(hashlib.sha256(base64.b64decode(key)).hexdigest())
+    return _chrome_id(hashlib.sha256(str(extension_dir.resolve()).encode()).hexdigest())
 
 
 def manifest_dirs() -> list[Path]:

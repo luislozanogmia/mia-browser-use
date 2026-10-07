@@ -1406,6 +1406,19 @@ let following = false;
 let followedUrl = null; // shared by following, so following may unshare it
 let followedTabId = null;
 let followedRoomUrl = null;
+// Chrome stops this background process whenever it idles. Without this, every restart
+// shared the same tab again under a new ID and the copies piled up until the room was full.
+const followedState = chrome.storage.session.get("followed").then(data => {
+  const f = data.followed;
+  if (f && Number.isInteger(f.tabId) && typeof f.url === "string" && typeof f.roomUrl === "string") {
+    followedTabId = f.tabId; followedUrl = f.url; followedRoomUrl = f.roomUrl;
+  }
+}).catch(() => {});
+
+function rememberFollowed() {
+  const followed = followedRoomUrl ? { tabId: followedTabId, url: followedUrl, roomUrl: followedRoomUrl } : null;
+  chrome.storage.session.set({ followed }).catch(() => {});
+}
 
 async function leaveFollowedTab() {
   const keptByOwner = manuallyShared.get(followedTabId) === followedUrl;
@@ -1422,10 +1435,12 @@ async function leaveFollowedTab() {
   followedUrl = null;
   followedTabId = null;
   followedRoomUrl = null;
+  rememberFollowed();
 }
 
 async function followActiveTab() {
   if (!following || !connected) return;
+  await followedState;
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const key = tab && pageKey(tab.url);
   if (!key || (key === followedUrl && tab.id === followedTabId
@@ -1437,13 +1452,17 @@ async function followActiveTab() {
     return;
   }
   // Leave the last followed page, unless the human shared it themselves.
-  if (followedTabId !== tab.id || followedUrl !== key) await leaveFollowedTab();
+  const samePage = followedTabId === tab.id && followedUrl === key && Boolean(followedRoomUrl);
+  if (!samePage) await leaveFollowedTab();
   const accepted = acceptedSharedTabs.get(tab.id);
   if (isAcceptedTab(tab) && sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id) return;
+  // One page, one ID: the same tab on the same page keeps the ID it already has
+  // (the room replaces a share with the same ID instead of adding a copy).
+  const keep = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : (samePage ? followedRoomUrl : null);
   followedUrl = key;
   followedTabId = tab.id;
-  followedRoomUrl = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : newRoomPageUrl();
-  if (!followedRoomUrl) followedRoomUrl = newRoomPageUrl();
+  followedRoomUrl = keep || newRoomPageUrl();
+  rememberFollowed();
   setRoomAccess(tab, true, followedRoomUrl);
   if (!sharedPages.has(followedRoomUrl)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: followedRoomUrl });
 }

@@ -151,14 +151,6 @@ class RoomHubTests(unittest.TestCase):
         self.assertEqual(left[0], ("b", {"type": "member", "event": "left", "actor": {"id": "luis", "kind": "human", "name": "luis"}}))
         self.assertEqual(self.join("c", "diego")[0][1]["presence"], [])
 
-    def test_a_dropped_connection_keeps_their_pages_shared(self):
-        # Mia Browser reconnects whenever Chrome restarts the extension; unsharing then
-        # wiped every answer box on the page and refused answers to open questions.
-        self.join("a", "luis")
-        self.share("a", "https://example.com/doc")
-        self.hub.disconnect("a")
-        self.assertEqual(list(self.hub.store.rooms["demo"].pages), [page_key("https://example.com/doc")])
-
     def test_untrusted_fields_are_cleaned(self):
         self.join("a", "luis")
         self.join("b", "ana")
@@ -417,58 +409,6 @@ class RoomServerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-
-    def test_a_link_shares_its_pages_again_after_reconnecting(self):
-        async def scenario():
-            import room_link
-
-            quick, room_link.RECONNECT_MIN = room_link.RECONNECT_MIN, 0.01
-            hub = RoomHub()
-            hub.store.create_room("demo", KEY)
-            server = await serve_room(hub, "127.0.0.1", 0)
-            port = server.sockets[0].getsockname()[1]
-
-            async def ignore(_message):
-                pass
-
-            link = RoomLink(f"ws://127.0.0.1:{port}", "demo", KEY, {"id": "luis", "kind": "human"}, ignore)
-            pages = lambda: list(hub.store.rooms["demo"].pages)
-
-            async def until(check):
-                for _ in range(200):
-                    if check():
-                        return
-                    await asyncio.sleep(0.01)
-                self.fail("timed out")
-            try:
-                link.start()
-                await until(lambda: link.connected)
-                await link.send({"action": "share", "page": {"url": "https://example.com/meet"}})
-                await until(lambda: len(pages()) == 1)
-                shared = pages()[0]
-                await link._ws.close()  # the connection drops; the room forgets luis's page
-                await until(lambda: not link.connected)
-                await until(lambda: link.connected and pages() == [shared])
-                await link.send({"action": "unshare", "url": "https://example.com/meet"})
-                await until(lambda: pages() == [])
-                await link._ws.close()
-                await until(lambda: not link.connected)
-                await until(lambda: link.connected)
-                await asyncio.sleep(0.05)
-                self.assertEqual(pages(), [])  # unshared stays unshared
-                # Sharing the same page again under fresh IDs (follow me, the panel) replaces it.
-                for n in range(5):
-                    await link.send({"action": "share", "page": {"url": "https://example.com/meet",
-                                                                 "room_url": f"https://room.invalid/p/again{n}"}})
-                await until(lambda: pages() == ["https://room.invalid/p/again4"])
-                self.assertEqual(list(link.my_shares), ["https://room.invalid/p/again4"])
-            finally:
-                room_link.RECONNECT_MIN = quick
-                await link.stop()
-                server.close()
-                await server.wait_closed()
-
-        asyncio.run(scenario())
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

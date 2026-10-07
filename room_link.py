@@ -44,7 +44,6 @@ class RoomLink:
         self.bots: dict[str, dict] = {}
         self.shared: dict[str, dict] = {}  # page key -> page
         self.local_pages: dict[str, str] = {}  # local origin+path -> opaque room page URL
-        self.my_shares: dict[str, dict] = {}  # opaque room page URL -> the share sent for it, re-sent on rejoin
         self.presence: dict[str, dict] = {}  # remote actor id -> last presence
         self.members: dict[str, dict] = {}
         self.suggestions: dict[str, dict] = {}
@@ -87,11 +86,6 @@ class RoomLink:
                             delay = RECONNECT_MIN
                             for bot in self.bots.values():
                                 await ws.send(json.dumps({"action": "actor", "actor": bot}))
-                            # The room drops a member's pages when they leave: share ours again.
-                            have = {p["url"] for p in message.get("pages", [])}
-                            for remote, share in self.my_shares.items():
-                                if remote not in have:
-                                    await ws.send(json.dumps(share, ensure_ascii=False))
                         self._track(message)
                         await self.on_message(message)
             except asyncio.CancelledError:
@@ -196,12 +190,6 @@ class RoomLink:
                 remote = source.get("room_url") or self.local_pages.get(local) or OPAQUE_PAGE_PREFIX + secrets.token_urlsafe(18)
                 if not isinstance(remote, str) or not remote.startswith(OPAQUE_PAGE_PREFIX) or page_key(remote) != remote:
                     return
-                # One page, one share: sharing it again under a new ID replaces the old
-                # share, or copies pile up (and are re-sent on every rejoin) until the room is full.
-                stale = self.local_pages.get(local)
-                if stale and stale != remote and stale in self.my_shares:
-                    del self.my_shares[stale]
-                    await self._ws.send(json.dumps({"action": "unshare", "url": stale}))
                 self.local_pages[local] = remote
                 outgoing["page"] = {"url": remote, "origin": origin, "title": origin,
                                     **({"href": source["url"]} if source.get("share_link") is True else {})}
@@ -214,10 +202,7 @@ class RoomLink:
                 outgoing["links"] = [{**link, "href": room_safe_href(link.get("href"))}
                                      for link in outgoing["links"] if isinstance(link, dict) and room_safe_href(link.get("href"))]
             await self._ws.send(json.dumps(outgoing, ensure_ascii=False))
-            if outgoing.get("action") == "share":
-                self.my_shares[outgoing["page"]["url"]] = outgoing
             if outgoing.get("action") == "unshare":
-                self.my_shares.pop(outgoing["url"], None)
                 self.local_pages = {local: remote for local, remote in self.local_pages.items()
                                     if remote != outgoing["url"]}
         except Exception:

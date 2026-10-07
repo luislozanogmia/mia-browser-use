@@ -1301,10 +1301,8 @@ class ChatHub:
                  {"done": "Done", "failed": "I couldn't finish", "stopped": "Stopped"}.get(task.status, "On it"))
         body = (f"{waiting} Approve or reject it in Mia's side panel." if waiting else task.result)
         try:
-            ok, value = await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
-                                                          "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
-            if not ok:
-                print(f"[chat] couldn't update the card for {task.id}: {_text(value, 200)}")
+            await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
+                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
         except Exception as exc:
             print(f"[chat] couldn't update the card for {task.id}: {exc}")
 
@@ -1516,9 +1514,8 @@ class ChatHub:
                 await self.publish()
                 return None
         first = here.get("url", "") if here else item["steps"][0].get("url", "")
-        # On the person's tab it's that tab's bot (one bot per tab); otherwise a bot for the tab it opens.
         task = self.add(Task(next(self.counter), item["name"], item.get("about", ""), first, "play", "parallel", "",
-                             self.agent_for(here["id"] if here else None, first)))
+                             self.agent_for(None, first)))
         task.automation, task.keep_open = item["id"], True
         # Full access: the person pressed Play themselves and is watching, so Send, Post and the like
         # run without asking. Scheduled runs and bots' runs still ask.
@@ -1578,22 +1575,6 @@ class ChatHub:
             self.say("mia", f"▶ {item['name']} · {mark}. {task.result}", task.color, task.id)
             print(f"[chat] play {item['id']} {task.status}: {task.result[:100]}")
             await self.publish()
-            await self.end_play_bot(task)
-
-    async def end_play_bot(self, task: Task) -> None:
-        """After a run its bot lives on only while its tab does: no tab (never opened, or closed meanwhile), no bot."""
-        agent = task.agent
-        if agent.id not in self.agents:
-            return
-        if agent.tab_id is None:
-            await self.drop(agent)
-            return
-        try:
-            tabs = await self.open_tabs()
-        except Exception:
-            return
-        if tabs and agent.tab_id not in {t.get("id") for t in tabs}:
-            await self.drop(agent)
 
     async def page_links(self, task: Task, keep_query: bool = False, within: str = "") -> tuple[list[str], str]:
         """Every web link on the page (or inside the within css), without fragment, trailing slash or

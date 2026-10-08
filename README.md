@@ -66,6 +66,16 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
 Mia answers with your own Claude account through Claude Code. See the
 [third-party service disclosure](TERMS.md) for how Mia installs and uses it.
 
+To build an automation as an ongoing goal, start a message with `/goal`, followed by the job and
+representative test destinations. Mia discovers the real page, tests one script step at a time, and
+keeps proven steps locked while fixing a failure. Progress and observed test cases are saved privately
+under `~/.ghost/builds/`, including a readable `progress.md`, so a renewed model session can recover them.
+Send `/goal` alone to list builds, or `/goal resume Automation name` to continue an interrupted one.
+
+Rehearsal skips consequential actions and leaves them unverified. Live testing requires a disposable
+destination and normal action approvals. Before saving, independent reviews check reuse and evidence,
+then Opus 5.5 Medium checks the person's experience. Stop remains available during long builds.
+
 ## Hermes Desktop setup
 
 Hermes Desktop must implement the authenticated local protocol in

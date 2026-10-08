@@ -103,18 +103,51 @@
       (node.querySelector(NESTED) !== null || (node.textContent || "").length > 300);
   }
 
+  // Label wrappers can contain a textarea's default text. Read label text while
+  // omitting form controls, so an accessible name cannot expose their contents.
+  function labelText(node) {
+    if (!node) return "";
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || "";
+    if (node.nodeType !== Node.ELEMENT_NODE ||
+        ["input", "textarea", "select", "script", "style"].includes(node.tagName.toLowerCase()) ||
+        node.isContentEditable) return "";
+    return Array.from(node.childNodes || [], labelText).join(" ");
+  }
+
+  function fieldLabel(node, tag) {
+    const clean = value => (value || "").replace(/\s+/g, " ").trim().slice(0, 100);
+    const aria = clean(node.getAttribute("aria-label"));
+    if (aria) return aria;
+    // ID references belong to the control's document or shadow root, not the
+    // top-level page (frames and shadow trees may reuse the same IDs).
+    const root = node.getRootNode();
+    const refs = (node.getAttribute("aria-labelledby") || "").trim().split(/\s+/);
+    const named = clean(refs.map(id => labelText(root.getElementById?.(id))).join(" "));
+    if (named) return named;
+    const associated = clean(Array.from(node.labels || [], labelText).join(" "));
+    return associated || clean(node.getAttribute("placeholder")) || clean(node.getAttribute("title")) || tag;
+  }
+
+  function controlState(node) {
+    return node.disabled || node.getAttribute("disabled") !== null ||
+      node.getAttribute("aria-disabled") === "true" || node.matches?.(":disabled") ? " [disabled]" : "";
+  }
+
   function describe(node, tag, n) {
-    const label = (node.textContent || "").trim().slice(0, 100) || node.getAttribute("aria-label") ||
+    const field = tag === "input" || tag === "textarea";
+    const label = field ? fieldLabel(node, tag) :
+      (node.textContent || "").trim().slice(0, 100) || node.getAttribute("aria-label") ||
       node.getAttribute("placeholder") || node.getAttribute("title") || tag;
     const href = node.getAttribute("href") || "";
     const type = node.getAttribute("type") || "";
     // Current form values can hold credentials; list the control, never its value.
     const value = (tag === "input" || tag === "textarea") && node.value ? "[REDACTED]" : "";
-    if (tag === "a") return `[${n}] link: ${label}` + (href ? ` (${href.slice(0, 200)})` : "");
-    if (tag === "input") return `[${n}] input(${type}): ${value || label}`;
-    if (tag === "select") return `[${n}] select: ${label}`;
-    if (tag === "textarea") return `[${n}] textarea: ${value || label}`;
-    return `[${n}] ${tag}: ${label}`;
+    const state = controlState(node);
+    if (tag === "a") return `[${n}] link: ${label}${state}` + (href ? ` (${href.slice(0, 200)})` : "");
+    if (tag === "input") return `[${n}] input(${type}): ${label}` + (value ? ` ${value}` : "") + state;
+    if (tag === "select") return `[${n}] select: ${label}${state}`;
+    if (tag === "textarea") return `[${n}] textarea: ${label}` + (value ? ` ${value}` : "") + state;
+    return `[${n}] ${tag}: ${label}${state}`;
   }
 
   function parentOf(node) {
@@ -185,6 +218,28 @@
     return false;
   }
 
+  // Selector copies need the browser's rendered spacing: inline links are not
+  // separate paragraphs. Only use innerText for plain, read-only light DOM;
+  // control/editor contents must retain the enumerator's redaction behavior.
+  function selectorText(root, maxChars) {
+    for (let ancestor = root; ancestor; ancestor = parentOf(ancestor)) {
+      if (!isVisible(ancestor)) return "";
+      if (ancestor.isContentEditable) return null;
+    }
+    const pending = [root];
+    let visited = 0;
+    while (pending.length) {
+      const node = pending.pop();
+      if (++visited > 10000) return null;
+      const tag = node.tagName.toLowerCase();
+      if (["input", "textarea", "select", "script", "style", "noscript", "svg",
+           "ghost-overlay", "iframe", "frame"].includes(tag) ||
+          node.isContentEditable || shadowOf(node)) return null;
+      for (const child of node.children || []) pending.push(child);
+    }
+    return typeof root.innerText === "string" ? root.innerText.trim().slice(0, maxChars) : null;
+  }
+
   /** Walk the page, number interactive elements for this actor, return text. */
   function enumerate(actor, maxChars, selector) {
     checkActor(actor);
@@ -192,6 +247,7 @@
     if (!rootEl) fail("NOT_FOUND", `Selector "${selector}" not found`);
     const items = [];
     const elements = [];
+    let target = null;
     let chars = 0;
     let skip = new Set();  // layers already read
 
@@ -211,9 +267,10 @@
         elements[n] = node;
         const container = isContainer(node, tag);
         // A container's text follows below, so its own line only names it.
-        const line = container ? `[${n}] ${tag}: ${(node.getAttribute("aria-label") || node.getAttribute("title") || "area").slice(0, 100)}`
+        const line = container ? `[${n}] ${tag}: ${(node.getAttribute("aria-label") || node.getAttribute("title") || "area").slice(0, 100)}${controlState(node)}`
           : describe(node, tag, n);
         items.push(line);
+        if (selector && node === rootEl) target = { choice: n, line: line.replace(/^\[\d+\] /, "") };
         chars += line.length;
         if (!container) return;
       }
@@ -238,7 +295,8 @@
     }
     const snapshot = `${actor}-${++snapshotCounter}`;
     lists.set(actor, { snapshot, elements });
-    return { text: items.join("\n"), count: elements.filter(Boolean).length, snapshot };
+    return { text: items.join("\n"), count: elements.filter(Boolean).length, snapshot, target,
+      rendered_text: selector ? selectorText(rootEl, maxChars) : null };
   }
 
   /** Find the element an actor means: its own number, or a selector. */
@@ -424,5 +482,99 @@
     return anchorOf(el);
   }
 
-  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
+  /** Complete, bounded visible records for a frozen destination witness.
+   * Light-DOM only. Ambiguity and omission indications fail closed; this does
+   * not infer that a site's declared total is truthful or transactionally stable.
+   */
+  function records(actor, spec) {
+    checkActor(actor);
+    const hold = message => fail("RECOVERY_HOLD", message);
+    const keys = ["collection", "row", "id", "identity", "fields", "total_count"];
+    if (!spec || typeof spec !== "object" || Array.isArray(spec) ||
+        Object.keys(spec).sort().join() !== keys.sort().join()) hold("invalid record selector specification");
+    const selector = value => {
+      if (typeof value !== "string" || !value.trim() || value.length > 500) hold("invalid record selector");
+      return value;
+    };
+    for (const key of ["collection", "row", "id", "identity", "total_count"]) selector(spec[key]);
+    if (!spec.fields || typeof spec.fields !== "object" || Array.isArray(spec.fields) ||
+        !Object.keys(spec.fields).length || Object.keys(spec.fields).length > 32) hold("invalid field selectors");
+    for (const [name, value] of Object.entries(spec.fields)) {
+      if (!name.trim() || name.length > 100 || /[\x00-\x1f\x7f]/.test(name)) hold("invalid field name");
+      selector(value);
+    }
+    const query = (root, css) => {
+      try { return Array.from(root.querySelectorAll(css)); }
+      catch { hold("invalid CSS selector"); }
+    };
+    const visible = el => {
+      for (let node = el; node && node.nodeType === Node.ELEMENT_NODE; node = node.parentElement) {
+        const style = styleOf(node);
+        if (node.hidden || node.getAttribute("aria-hidden") === "true" || style.display === "none" ||
+            style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) return false;
+      }
+      return el.getClientRects().length > 0;
+    };
+    const one = (root, css) => {
+      const matches = query(root, css);
+      if (matches.length !== 1 || !visible(matches[0])) hold("record selector must identify one visible element");
+      return matches[0];
+    };
+    let textBytes = 0, nodes = 0;
+    const text = el => {
+      let out = "";
+      const visit = node => {
+        if (++nodes > 50000) hold("record node limit exceeded");
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (out.length + node.textContent.length > 4096) hold("record text limit exceeded");
+          out += node.textContent;
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"].includes(node.tagName)) return;
+        if (["INPUT", "TEXTAREA", "SELECT", "IFRAME", "FRAME"].includes(node.tagName) ||
+            node.isContentEditable || node.hasAttribute("contenteditable") || shadowOf(node)) hold("editable or unsupported record text");
+        if (!visible(node)) hold("hidden record text cannot be evidence");
+        for (const child of node.childNodes) visit(child);
+      };
+      visit(el);
+      if (out.length > 4096 || (textBytes += out.length) > 1000000) hold("record text limit exceeded");
+      return out.trim();
+    };
+    if (document.readyState !== "complete" || query(document, '[aria-busy="true"]').length) hold("destination is still loading");
+    const collection = one(document, spec.collection), countElement = one(document, spec.total_count);
+    const totalText = text(countElement);
+    if (!/^(0|[1-9][0-9]*)$/.test(totalText)) hold("total count must be an exact nonnegative integer");
+    const total = Number(totalText);
+    if (!Number.isSafeInteger(total) || total > 1000) hold("record count limit exceeded");
+    const descendants = query(collection, "*");
+    if (descendants.length > 50000) hold("record collection node limit exceeded");
+    for (const node of [collection, ...descendants]) {
+      if (shadowOf(node) || ["IFRAME", "FRAME"].includes(node.tagName)) hold("unsupported collection tree");
+      if (node.hasAttribute("data-virtualized") && node.getAttribute("data-virtualized") !== "false") hold("virtualized collection");
+      for (const key of ["aria-rowcount", "aria-setsize"]) {
+        const value = node.getAttribute(key);
+        if (value !== null && value !== String(total)) hold("collection size indicates omitted records");
+      }
+    }
+    const rows = query(collection, spec.row);
+    if (rows.length !== total) hold("observed rows do not equal destination total");
+    const ids = new Set(), result = [];
+    for (const [index, row] of rows.entries()) {
+      if (!visible(row)) hold("hidden row cannot establish complete coverage");
+      for (const key of ["aria-rowindex", "aria-posinset"]) {
+        const value = row.getAttribute(key);
+        if (value !== null && value !== String(index + 1)) hold("row positions indicate omissions");
+      }
+      const id = text(one(row, spec.id)), identity = text(one(row, spec.identity));
+      if (!id || !identity || /[\x00-\x1f\x7f]/.test(id + identity) || ids.has(id)) hold("empty, malformed, or duplicate record identity");
+      ids.add(id);
+      const fields = Object.create(null);
+      for (const [name, css] of Object.entries(spec.fields)) fields[name] = text(one(row, css));
+      result.push({ id, identity, fields });
+    }
+    return { destination_url: location.href, complete: true, records: result };
+  }
+
+  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, humanFocus, records, build: globalThis.__ghostBuild };
 })();

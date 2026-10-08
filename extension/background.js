@@ -1,4 +1,4 @@
-importScripts("reel_store.js");
+importScripts("reel_store.js", "dev_reload.js");
 /**
  * Ghost Bridge — Background Service Worker
  *
@@ -17,6 +17,33 @@ let connected = false;
 let port = DEFAULT_PORT;
 let token = "";
 let intentionallyDisconnected = false;
+let developmentCommands = 0;
+let developmentStateAt = 0;
+let developmentActivityAt = Date.now();
+const developmentPanels = new Map();
+const developmentQuiescence = new MiaDevelopmentReload.PanelQuiescence({ nonce: () => randomHex() });
+const developmentReload = new MiaDevelopmentReload.DevelopmentReloader({
+  chrome, fetch: (...args) => fetch(...args), crypto,
+  quiesce: () => developmentQuiescence.acquire(),
+  idle: () => connected && ws?.readyState === WebSocket.OPEN && developmentCommands === 0
+    && Date.now() - developmentActivityAt > 10000
+    && chatState?.development_idle === true && Date.now() - developmentStateAt < 8000
+    && developmentPanels.size > 0 && [...developmentPanels.values()].every(panel =>
+      panel.clean === true && Date.now() - panel.at < 3000),
+});
+developmentReload.init();
+setInterval(() => developmentReload.tick(), 5000);
+chrome.runtime.onConnect.addListener(panel => {
+  if (panel.name !== "mia-development-idle" || panel.sender?.url !== chrome.runtime.getURL("sidepanel.html")) return;
+  developmentQuiescence.add(panel);
+  developmentPanels.set(panel, { clean: false, at: 0 });
+  panel.onMessage.addListener(message => {
+    if (message?.nonce) { developmentQuiescence.acknowledge(panel, message); return; }
+    developmentPanels.set(panel, { clean: message?.clean === true, at: Date.now() });
+    if (message?.clean !== true) developmentQuiescence.abort();
+  });
+  panel.onDisconnect.addListener(() => { developmentQuiescence.remove(panel); developmentPanels.delete(panel); });
+});
 
 function randomHex(bytes = 32) {
   const data = new Uint8Array(bytes);
@@ -163,12 +190,14 @@ async function connect() {
     if (!msg.id || !msg.command) return;
 
     const args = msg.args || {};
+    if (msg.command !== "ghost_chat_state") developmentQuiescence.abort();
+    developmentCommands += 1;
     try {
       const result = await handleCommand(msg.command, args);
       socket.send(JSON.stringify({ id: msg.id, result, meta: await tabMeta(args.tab_id ?? result?.tab_id ?? result?.id) }));
     } catch (err) {
       socket.send(JSON.stringify({ id: msg.id, error: err.message || String(err) }));
-    }
+    } finally { developmentCommands -= 1; }
   };
 
   socket.onclose = async () => {
@@ -176,6 +205,7 @@ async function connect() {
     ws = null;
     const wasConnected = connected;
     connected = false;
+    developmentQuiescence.abort();
     setBadge(token ? "OFF" : "PAIR", token ? "#ef4444" : "#f59e0b");
     console.log("[ghost-bridge] disconnected");
     if (intentionallyDisconnected) return;
@@ -245,6 +275,9 @@ async function routeCommand(command, args) {
     case "ghost_read":
       return readPage(args);
 
+    case "ghost_records":
+      return readRecords(args);
+
     case "ghost_pdf_fetch":
       return fetchPdf(args);
 
@@ -296,6 +329,8 @@ async function routeCommand(command, args) {
     // Internal: the bridge's chat (messages, tasks, approvals) for Mia's side panel.
     case "ghost_chat_state":
       chatState = args;
+      developmentStateAt = Date.now();
+      if (args.development_idle !== true) developmentQuiescence.abort();
       chrome.runtime.sendMessage({ type: "chat-state", state: args }).catch(() => {});
       return { ok: true };
 
@@ -463,10 +498,16 @@ async function navigate(args) {
   }
 
   const tab0 = await chrome.tabs.get(tabId);
-  if (tab0.url !== url) {
+  if (tab0.url !== url || args.reload === true) {
     await refuseIfHumanViewing(args, tabId, "HUMAN_VIEWING", "ask them before navigating it away");
-    // Only a local, single-user call brings the tab to the front.
-    await chrome.tabs.update(tabId, isActorCall(args) ? { url } : { url, active: true });
+    if (tab0.url === url) {
+      // Replays start from a fresh document even when client-side pagination
+      // or filled fields have changed without changing the page's address.
+      await chrome.tabs.reload(tabId);
+    } else {
+      // Only a local, single-user call brings the tab to the front.
+      await chrome.tabs.update(tabId, isActorCall(args) ? { url } : { url, active: true });
+    }
     await waitForTabLoad(tabId, args.timeout || 30000);
   }
 
@@ -492,14 +533,27 @@ function isSheetExport(url) {
 }
 
 // The open sheet's cells as CSV, fetched with the person's own Google session (nothing is downloaded).
-async function sheetCells(url, maxChars) {
+async function sheetCells(url, maxChars, deadline = Date.now() + 65000) {
   const match = SHEET_RE.exec(url || "");
-  if (!match) return "";
+  if (!match) return null;
   const gid = /[#&?]gid=(\d+)/.exec(url)?.[1];
-  const response = await fetch(`https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv${gid ? `&gid=${gid}` : ""}`,
-    { credentials: "include", cache: "no-store", redirect: "follow" });
+  let response;
+  // Retry only the read. A rate limit after a paste must never repeat that paste.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = await fetch(`https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv${gid ? `&gid=${gid}` : ""}`,
+      { credentials: "include", cache: "no-store", redirect: "follow" });
+    if (response.status !== 429 || attempt === 2) break;
+    const retryAfter = response.headers.get("retry-after");
+    const seconds = retryAfter !== null && /^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter) : NaN;
+    const date = retryAfter ? Date.parse(retryAfter) : NaN;
+    const delay = Math.max(30000, Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(date) ? date - Date.now() : 30000);
+    if (Date.now() + delay > deadline) break; // Hold rather than retry earlier than the server allows.
+    await response.body?.cancel().catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
   const type = response.headers.get("content-type") || "";
-  if (!response.ok || type.includes("html")) return "";
+  if (!response.ok) throw new Error(`SHEET_UNREADABLE: Google Sheets export returned HTTP ${response.status}`);
+  if (type.includes("html")) throw new Error("SHEET_UNREADABLE: Google Sheets returned a sign-in or access page instead of CSV");
   const reader = response.body.getReader();
   let text = "", decoder = new TextDecoder();
   while (text.length < maxChars) {
@@ -533,13 +587,16 @@ function parseCsv(text) {
 
 // A link the same however it was copied: no protocol, www, query, # part or trailing slash, any case.
 function sameKey(text) {
-  return decodeURIComponent(String(text || "").trim()).toLowerCase()
+  let value = String(text || "").trim();
+  // Sheet cells include ordinary prose such as "growth 200%", not just URLs.
+  try { value = decodeURIComponent(value); } catch { /* Keep literal malformed percent text. */ }
+  return value.toLowerCase()
     .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
 }
 
-async function sheetRows(id, gid) {
-  const csv = await sheetCells(`https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}`, 5_000_000);
-  if (!csv) throw new Error("SHEET_UNREADABLE: couldn't read the sheet; is this Chrome signed in to a Google account that can edit it?");
+async function sheetRows(id, gid, deadline) {
+  const csv = await sheetCells(`https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}`, 5_000_000, deadline);
+  if (csv === null) throw new Error("SHEET_UNREADABLE: couldn't read the sheet; is this Chrome signed in to a Google account that can edit it?");
   return parseCsv(csv);
 }
 
@@ -570,11 +627,23 @@ async function sheetAppend(args) {
   const values = (Array.isArray(args.row) ? args.row : []).slice(0, 26).map(v => String(v ?? "").replace(/[\t\r\n]+/g, " ").trim());
   if (!values.some(Boolean)) throw new Error("row has no values");
   const width = values.length;
-  const rows = await sheetRows(id, gid);
+  const readDeadline = Date.now() + 120000;
+  const rows = await sheetRows(id, gid, readDeadline);
+  const key = args.unique ? sameKey(args.unique) : "";
+  const matches = key ? rows.map((r, i) => r.some(cell => cell && sameKey(cell) === key) ? i : -1).filter(i => i >= 0) : [];
+  if (args.require_existing === true) {
+    if (!args.unique) throw new Error("DUPLICATE_CHECK_HELD: an existing unique key is required");
+    if (matches.length !== 1) throw new Error("DUPLICATE_CHECK_HELD: expected exactly one existing keyed row; no write performed");
+    const at = matches[0];
+    if (rows[at].length !== values.length || rows[at].some((cell, i) => cell !== values[i])) {
+      throw new Error("DUPLICATE_CHECK_HELD: the existing row differs from the verified payload; no write performed");
+    }
+    const after = await sheetRows(id, gid, readDeadline);
+    if (JSON.stringify(after) !== JSON.stringify(rows)) throw new Error("DUPLICATE_CHECK_HELD: the destination changed during verification");
+    return { added: false, already: true, row: at + 1, existing: rows[at], row_count: rows.length, no_write: true };
+  }
   if (args.unique) {
-    const key = sameKey(args.unique);
-    const at = rows.findIndex(r => r.some(cell => cell && sameKey(cell) === key));
-    if (at >= 0) return { added: false, already: true, row: at + 1 };
+    if (matches.length) return { added: false, already: true, row: matches[0] + 1 };
   }
   // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
   let last = rows.length;
@@ -615,7 +684,9 @@ async function sheetAppend(args) {
           box.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
           return { seen, pasted: seen.cell };
         },
-        args: [values.join("\t"), String(args.tab_name || "").trim()],
+        // These are copied strings, not formulas or locale-dependent dates/numbers.
+        // Sheets consumes one leading apostrophe as its literal-text marker.
+        args: [values.map(value => value ? "'" + value : "").join("\t"), String(args.tab_name || "").trim()],
       });
       const result = run?.result || {};
       seen = result.seen || seen;
@@ -629,8 +700,9 @@ async function sheetAppend(args) {
     if (pasted !== `A${target}`) throw new Error(`SHEET_WRONG_CELL: the sheet opened on ${pasted}, not A${target}; nothing was checked`);
     // Sheets saves in the background: read the row back until it's there.
     for (let attempt = 0; attempt < 16; attempt++) {
-      await new Promise(r => setTimeout(r, 750));
-      const now = (await sheetRows(id, gid))[target - 1] || [];
+      if (Date.now() >= readDeadline) break;
+      await new Promise(r => setTimeout(r, 2500));
+      const now = (await sheetRows(id, gid, readDeadline))[target - 1] || [];
       if (values.every((v, i) => (now[i] || "").trim() === v)) return { added: true, row: target, values };
     }
     throw new Error(`SHEET_NOT_SAVED: pasted into row ${target} but reading it back didn't show the row; check the sheet`);
@@ -641,9 +713,9 @@ async function sheetAppend(args) {
 
 async function withSheetCells(tab, text, maxChars) {
   if (!SHEET_RE.test(tab.url || "")) return text;
-  let cells = "";
+  let cells = null;
   try { cells = await sheetCells(tab.url, SHEET_CHARS); } catch {}
-  return cells
+  return cells !== null
     ? `Cells of the open sheet tab, as CSV (first row is usually the header)${cells.length >= SHEET_CHARS ? ", cut off: the tab is bigger" : ""}:\n${cells}\n\nThe page around it:\n${text}`
     : `${text}\n\n(The sheet's cells are drawn on a canvas and couldn't be fetched: the person may not have access.)`;
 }
@@ -675,7 +747,19 @@ async function readPage(args) {
   const tabId = await getActiveTabId(args);
   const read = await readTabContent(tabId, args.max_chars || 4000, args.selector, actorOf(args));
   const tab = await chrome.tabs.get(tabId);
-  return { url: tab.url, title: tab.title, content: await withSheetCells(tab, read.text, args.max_chars || 4000), snapshot: read.snapshot };
+  const content = await withSheetCells(tab, read.text, args.max_chars || 4000);
+  return { url: tab.url, title: tab.title, content, snapshot: read.snapshot, target: read.target,
+    rendered_text: content === read.text ? read.rendered_text : null };
+}
+
+async function readRecords(args) {
+  const tabId = await getActiveTabId(args);
+  return runInPage(tabId, (actor, spec) => {
+    try {
+      if (typeof globalThis.__ghostPage?.records !== "function") return { error: "RECOVERY_HOLD: record helper unavailable" };
+      return { value: globalThis.__ghostPage.records(actor, spec) };
+    } catch (err) { return { error: err.message }; }
+  }, [actorOf(args), args.spec]);
 }
 
 async function fetchPdf(args) {
@@ -1591,6 +1675,7 @@ async function chatTab() {
 async function chatFromPanel(msg) {
   if (!CHAT_ACTIONS.has(msg.action)) return { ok: false, error: "Unknown action" };
   if (!(connected && ws && ws.readyState === WebSocket.OPEN)) return { ok: false, error: "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome" };
+  if (msg.action !== "sync") { developmentStateAt = 0; developmentActivityAt = Date.now(); developmentQuiescence.abort(); }
   const chat = { action: msg.action, task: typeof msg.task === "string" ? msg.task.slice(0, 32) : undefined,
                  agent: typeof msg.agent === "string" ? msg.agent.slice(0, 64) : undefined,
                  chat: typeof msg.chat === "string" ? msg.chat.slice(0, 40) : undefined,
@@ -1647,10 +1732,14 @@ chrome.commands?.onCommand.addListener(async (command, tab) => {
   } catch {}
 });
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "development-reload" && sender.url === chrome.runtime.getURL("sidepanel.html")) {
+    developmentReload.setEnabled(msg.enabled).then(ok => sendResponse({ ok }));
+    return true;
+  }
   if (msg.type === "get-status") {
     Promise.all([chrome.tabs.query({ active: true, currentWindow: true }), chrome.tabs.query({})]).then(([[tab], tabs]) => {
       sendResponse({
-        ...getStatus(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isAcceptedTab(tab)),
+        ...getStatus(), developmentReload: developmentReload.status(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isAcceptedTab(tab)),
         room: roomMe ? { me: roomMe, shared: [...sharedPages], pages: [...sharedPageDetails.values()],
                          accepted: tabs.filter(isAcceptedTab).map(tab => acceptedSharedTabs.get(tab.id).roomUrl) } : null,
       });

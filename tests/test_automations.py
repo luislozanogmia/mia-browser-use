@@ -27,13 +27,19 @@ class PlayBrowser:
     def __init__(self, missing=()):
         self.calls = []
         self.missing = set(missing)
+        self.next_tab = 91
 
     async def __call__(self, command, args):
         self.calls.append((command, args))
         if command == "ghost_tab_open":
-            return True, {"id": 91, "url": args["url"]}
+            tab = self.next_tab
+            self.next_tab += 1
+            return True, {"id": tab, "url": args["url"]}
         if command == "ghost_read" and args.get("selector") == "#total":
             return True, {"url": "https://reports.example/", "content": "[0] span: 42 open items"}
+        if command == "ghost_read" and args.get("selector") in {"#export", "#new-button", "div.box"}:
+            line = {"#export": "button: Export", "#new-button": "button: Renamed button", "div.box": "div: Message"}[args["selector"]]
+            return True, {"url": "https://reports.example/", "content": f"[0] {line}", "target": {"choice": 0, "line": line}}
         if command == "ghost_read":
             return True, {"url": "https://reports.example/", "title": "Report", "content": PAGE}
         if command == "ghost_wait" and args.get("selector") in self.missing:
@@ -145,11 +151,12 @@ def test_play_replays_steps_in_its_own_tab_with_copied_values(tmp_path):
         task = await hub.play(item)
         await finish(task)
         assert task.status == "done", task.result
+        assert task.result == "All 4 steps ran.\nTotal: 42 open items"
         assert browser.actions() == [
             ("ghost_tab_open", {"url": "https://reports.example/", "actor_id": task.agent.id}),
             ("ghost_fill", {"choice": 1, "value": "total 42 open items", "tab_id": 91, "actor_id": task.agent.id,
                             "human_ok": True, "expected_url": ""}),
-            ("ghost_click", {"choice": 2, "tab_id": 91, "actor_id": task.agent.id, "human_ok": True, "expected_url": ""}),
+            ("ghost_click", {"selector": "#export", "tab_id": 91, "actor_id": task.agent.id, "human_ok": True, "expected_url": ""}),
         ]
         assert hub.scripts.get(item["id"])["last_run"]["status"] == "done"
         assert hub.messages[-1]["text"].startswith("▶ Daily report · Done.")
@@ -244,15 +251,35 @@ class ListBrowser(PlayBrowser):
 
     def __init__(self):
         super().__init__()
-        self.url, self.page = "", 1
+        self.tabs, self.current_tab, self.next_tab = {91: ""}, 91, 91
+        self.page = 1
+
+    @property
+    def url(self):
+        return self.tabs[self.current_tab]
+
+    @url.setter
+    def url(self, value):
+        self.tabs[self.current_tab] = value
 
     async def __call__(self, command, args):
         self.calls.append((command, args))
-        if command in {"ghost_tab_open", "ghost_navigate"}:
+        if command == "ghost_tab_open":
+            while self.tabs.get(self.next_tab):
+                self.next_tab += 1
+            self.current_tab = self.next_tab
+            self.next_tab += 1
+            self.tabs[self.current_tab] = args["url"]
+            return True, {"id": self.current_tab, "url": args["url"]}
+        if command == "ghost_tab_close":
+            self.tabs.pop(args["tab_id"], None)
+            self.current_tab = next(iter(self.tabs))
+            return True, {"closed": True}
+        if args.get("tab_id") in self.tabs:
+            self.current_tab = args["tab_id"]
+        if command == "ghost_navigate":
             self.url = args["url"]
-            if "search" in self.url and command == "ghost_navigate":
-                pass  # back to the list: same page as before
-            return True, {"id": 91, "url": args["url"]}
+            return True, {"id": self.current_tab, "url": args["url"]}
         if command == "ghost_click" and args.get("choice") == 4 and "search" in self.url:
             self.page += 1
             return True, {"clicked": True}
@@ -284,7 +311,7 @@ def test_a_repeating_automation_goes_through_every_link_page_after_page(tmp_path
         opened = [a["url"] for c, a in browser.calls if c == "ghost_navigate" and "/in/" in a["url"]]
         assert opened == ["https://www.linkedin.com/in/ana-silva", "https://www.linkedin.com/in/bo-chen",
                           "https://www.linkedin.com/in/cy-diaz"]
-        assert task.result == "Done for 3 links."
+        assert task.result.splitlines()[0] == "Done for 3 links."
         # The next run carries on where this one ended: nothing left, until Start over.
         assert hub.states[-1]["automations"][0]["done"] == 3
         browser.page = 1
@@ -293,6 +320,194 @@ def test_a_repeating_automation_goes_through_every_link_page_after_page(tmp_path
         assert task.result == "Done for 0 links."
         await hub.handle({"action": "automation_reset", "automation": item["id"]})
         assert hub.scripts.get(item["id"])["done"] == []
+    asyncio.run(main())
+
+
+def test_a_copy_only_loop_reads_each_new_profile_instead_of_reusing_previous_text():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        copied = []
+        original = hub.play_step
+
+        async def record_copy(task, step, values, dry=False):
+            result = await original(task, step, values, dry)
+            if step["do"] == "copy":
+                copied.append(values[step["as"]])
+            return result
+
+        hub.play_step = record_copy
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        task = await hub.play(item, {"template": "unused"})
+        await task.job
+        assert task.status == "done", task.result
+        assert copied == ["Ana", "Bo", "Cy"]
+        assert len(hub.scripts.get(item["id"])["done"]) == 3
+
+    asyncio.run(main())
+
+
+def test_pagination_continues_past_an_already_done_middle_page():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        # The second page was completed by an earlier run, but page three is new.
+        hub.scripts.mark_done(item["id"], "https://www.linkedin.com/in/cy-diaz")
+        original = browser.__call__
+
+        async def call(command, args):
+            if command == "ghost_read" and "search" in browser.tabs.get(args.get("tab_id"), "") and browser.page == 3:
+                browser.calls.append((command, args))
+                return True, {"url": browser.tabs[args["tab_id"]], "content":
+                    "[0] link: Ana again (https://www.linkedin.com/in/ana-silva-new)"}
+            return await original(command, args)
+
+        hub.call = call
+        browser.name = lambda: "Ana Silva"
+        task = await hub.play(item, {"template": "unused"})
+        await task.job
+        assert task.status == "done", task.result
+        assert task.result.splitlines()[0] == "Done for 3 links."
+        assert "https://www.linkedin.com/in/ana-silva-new" in hub.scripts.get(item["id"])["done"]
+
+    asyncio.run(main())
+
+
+def test_a_rehearsal_loop_does_not_mark_skipped_send_actions_done():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3] + [{"do": "click", "text": "Send"}]}))
+        original = hub.play_each
+
+        async def rehearsal(task, script, values, dry=False, **kwargs):
+            return await original(task, script, values, dry=True, **kwargs)
+
+        hub.play_each = rehearsal
+        task = await hub.play(item, {"template": "unused"})
+        await task.job
+        assert task.status == "done", task.result
+        assert task.result.startswith("Done for 0 links. Skipped 3:")
+        assert "not marked done" in task.result
+        assert hub.scripts.get(item["id"])["done"] == []
+        assert not any(c == "ghost_click" and a.get("choice") == 3 for c, a in browser.calls)
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_loop_failure_and_stop_report_items_completed_by_this_task(stop):
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        original = hub.play_step
+        reached = asyncio.Event()
+
+        async def fail_or_block(task, step, values, dry=False):
+            if step["do"] == "open" and values.get("link", "").endswith("bo-chen"):
+                reached.set()
+                if stop:
+                    await asyncio.Future()
+                raise RuntimeError("you rejected that step")
+            return await original(task, step, values, dry)
+
+        hub.play_step = fail_or_block
+        task = await hub.play(item, {"template": "unused"})
+        await asyncio.wait_for(reached.wait(), 3)
+        if stop:
+            task.job.cancel()
+        await task.job
+        assert task.status == ("stopped" if stop else "failed"), task.result
+        assert ("Stopped after 1 link." if stop else "Done for 1 before that.") in task.result
+        assert hub.scripts.get(item["id"])["done"] == ["https://www.linkedin.com/in/ana-silva"]
+
+    asyncio.run(main())
+
+
+def test_append_derives_the_current_page_url_each_time_but_preserves_explicit_values():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        task = await hub.play(item, {"template": "unused"})
+        await task.job
+
+        async def tabs():
+            return [{"id": task.tab_id, "url": browser.url}]
+
+        hub.open_tabs = tabs
+        append = {"do": "append", "sheet": "https://docs.google.com/spreadsheets/d/test/edit",
+                  "tab": "Test", "row": ["{{page_url}}"], "unique": "{{page_url}}"}
+        values = {}
+        for name in ["ana-silva", "bo-chen"]:
+            url = f"https://www.linkedin.com/in/{name}"
+            await hub.play_step(task, {"do": "open", "url": url}, values)
+            result = await hub.play_step(task, append, values, dry=True)
+            assert str([url]) in result
+            assert "page_url" not in values
+        # The schema permits an explicit input or a copy with this name.
+        clean({"name": "Explicit URL", "inputs": [{"name": "page_url"}], "steps": [append]})
+        values["page_url"] = "https://explicit.example/source"
+        await hub.play_step(task, {"do": "open", "url": "https://www.linkedin.com/in/ana-silva"}, values)
+        assert str([values["page_url"]]) in await hub.play_step(task, append, values, dry=True)
+        await hub.play_step(task, {"do": "copy", "css": "h1", "as": "page_url"}, values)
+        copied = values["page_url"]
+        await hub.play_step(task, {"do": "open", "url": "https://www.linkedin.com/in/bo-chen"}, values)
+        assert str([copied]) in await hub.play_step(task, append, values, dry=True)
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("query_url", [False, True])
+def test_a_next_page_cycle_stops_with_an_explicit_failure(query_url):
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        original = browser.__call__
+
+        async def call(command, args):
+            if command == "ghost_click" and args.get("choice") == 4 and "search" in browser.url:
+                browser.page = 1 if browser.page == 2 else 2
+                return True, {"clicked": True}
+            ok, value = await original(command, args)
+            if query_url and command == "ghost_read" and "search" in browser.url:
+                value["url"] = browser.url.split("&page=", 1)[0] + f"&page={browser.page}"
+            return ok, value
+
+        hub.call = call
+        task = await hub.play(item, {"template": "unused"})
+        await asyncio.wait_for(task.job, 3)
+        assert task.status == "failed", task.result
+        assert "pagination returned to a list page already checked" in task.result
+        assert len(hub.scripts.get(item["id"])["done"]) == 3
+
+    asyncio.run(main())
+
+
+def test_client_pagination_is_preserved_without_reloading_the_list():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        original = browser.__call__
+
+        async def call(command, args):
+            if command == "ghost_navigate" and "search" in args["url"]:
+                browser.page = 1  # Real reload loses client-only pagination state.
+            return await original(command, args)
+
+        hub.call = call
+        task = await hub.play(item, {"template": "unused"})
+        await asyncio.wait_for(task.job, 3)
+        assert task.status == "done", task.result
+        assert task.play_finished == 3
+        assert not any(c == "ghost_navigate" and "search" in a["url"] for c, a in browser.calls)
+        assert [a["tab_id"] for c, a in browser.calls if c == "ghost_tab_close"] == [92]
+        assert task.tab_id == 91 and browser.tabs[91] == LOOP["steps"][0]["url"]
+
     asyncio.run(main())
 
 
@@ -370,7 +585,7 @@ def test_the_list_page_can_be_a_link_the_person_gives_before_play(tmp_path):
         task = await hub.play(saved, {"template": "Hi {{first_name}}",
                                       "list_url": "https://www.linkedin.com/search/results/people/?keywords=sales"})
         await finish(task)
-        assert task.status == "done" and task.result == "Done for 3 links."
+        assert task.status == "done" and task.result.splitlines()[0] == "Done for 3 links."
         first = next(a for c, a in browser.calls if c == "ghost_tab_open")
         assert first["url"] == "https://www.linkedin.com/search/results/people/?keywords=sales"
 
@@ -421,58 +636,69 @@ LOOP_SEND = {**LOOP, "steps": LOOP["steps"] + [{"do": "click", "text": "Send"}]}
 SEARCH = "https://www.linkedin.com/search/results/people/?network=F"
 
 
-def test_a_builder_bot_tests_its_script_on_the_real_pages_and_saves_only_what_passed(tmp_path):
+def test_a_builder_keeps_a_rehearsed_send_pending_instead_of_saving_it(tmp_path, monkeypatch):
+    from automation_build import BuildJournal
+    monkeypatch.setattr(ghost_chat, "BuildJournal", lambda **kw: BuildJournal(root=tmp_path / "builds", **kw))
     async def main():
         browser = ListBrowser()
-        hub = builder_hub(browser, [[
-            {"tool": "ghost_read", "args": {}},
-            {"done": "Messages each connection.", "automation": LOOP_SEND},  # not tested yet
-            {"tool": "test_automation", "args": {"automation": LOOP_SEND, "inputs": {"template": "Hi {{first_name}}"}}},
-            {"done": "Messages each connection; fill Message before Play.", "automation": LOOP_SEND},
-        ]], {"reply": "A builder bot is on it.", "tasks": [{
+        steps = [{"tool": "build_plan", "args": {"steps": [
+            "Read the connection list", "Open a representative profile", "Copy the first name",
+            "Open the message composer", "Fill the person's message", "Verify before sending"]}}] + [{"tool": "test_automation", "args": {
+            "automation": {**LOOP_SEND, "steps": LOOP_SEND["steps"][:n]},
+            "inputs": {"template": "Hi {{first_name}}"}}}
+            for n in range(1, len(LOOP_SEND["steps"]) + 1)]
+        hub = builder_hub(browser, [steps + [
+            {"done": "Messages each connection.", "automation": LOOP_SEND},
+            {"fail": "Send needs live verification on a disposable destination."},
+        ]], {"reply": "A builder is on it.", "tasks": [{
             "title": "Build it", "kind": "build", "url": SEARCH,
             "goal": "Message each 1st connection with the person's text, starting with their first name.",
             "build": {"name": "1st connection message", "schedule": {"kind": "manual"}}}]}, tmp_path)
         await hub.handle({**send("make an automation that messages my 1st connections"), "model": "claude-opus-5-5"})
         task = next(iter(hub.tasks.values()))
         await run_task(hub, task)
-        assert task.kind == "build" and task.status == "done", task.result
+        assert task.kind == "build" and task.status == "failed", task.result
         builder = hub.made[0]
         assert builder["model"] == "claude-opus-5-5" and builder["effort"] == ghost_chat.BUILD_EFFORT
-        assert ghost_chat.BUILD_PROMPT in builder["system"] and "# Building Play Automations" in builder["system"]
-        prompts = builder["session"].prompts
-        assert "hasn't passed test_automation" in prompts[2]
-        test = prompts[3]
-        assert test.startswith("Result of test_automation:") and "Test passed: every step worked." in test
-        assert "The list page has 2 items with “linkedin.com/in/”" in test and "Next-page button “Next”: found" in test
+        assert "# Building Play Automations" in builder["system"]
+        test = builder["session"].prompts[len(steps)]
+        assert "Rehearsal passed" in test and "remain unverified" in test
+        assert "The list page has 2 items" in test and "Next-page button “Next”: found" in test
         assert "copied “Ana” as {{first_name}}" in test and "typed “Hi Ana”" in test
-        assert "skipped in this test: on a real run it asks the person first (Click “Send”?)" in test
-        # The test never pressed Send, nor asked about it: the only click was Message.
-        assert hub.asked == [f"Open {SEARCH}? This sends the address to another site."]
-        assert [a.get("choice") for c, a in browser.calls if c == "ghost_click"] == [1]
-        saved = hub.scripts.find("1st connection message")
-        assert saved["steps"][-1] == {"do": "click", "text": "Send"} and saved["inputs"][0]["name"] == "template"
-        assert any(m["text"].startswith("Saved “1st connection message” as a Play Automation") for m in hub.messages)
+        assert "skipped in this test" in test
+        assert "hasn't passed test_automation" in builder["session"].prompts[-1]
+        assert task.build_journal.state["pending_steps"] == [6]
+        assert task.build_journal.state["validated_prefix"] == 5
+        assert not hub.scripts.list() and len(hub.made) == 1
+        assert not any(c == "ghost_click" and a.get("choice") == 3 for c, a in browser.calls)
     asyncio.run(main())
 
 
-def test_a_failed_test_shows_the_builder_what_is_on_the_page():
+def test_a_failed_test_shows_the_builder_what_is_on_the_page(tmp_path, monkeypatch):
+    from automation_build import BuildJournal
+    monkeypatch.setattr(ghost_chat, "BuildJournal", lambda **kw: BuildJournal(root=tmp_path / "builds", **kw))
     async def main():
         broken = {**LOOP, "steps": LOOP["steps"][:3] + [{"do": "click", "text": "Send InMail"}]}
-        hub = builder_hub(ListBrowser(), [[
-            {"tool": "test_automation", "args": {"automation": broken, "inputs": {"template": "x"},
-                                                 "link": "https://www.linkedin.com/in/bo-chen"}},
+        steps = [{"tool": "build_plan", "args": {"steps": [
+            "Read the connection list", "Open a representative profile", "Copy the first name",
+            "Find the requested message action"]}}] + [{"tool": "test_automation", "args": {
+            "automation": {**broken, "steps": broken["steps"][:n]}, "inputs": {"template": "x"},
+            "link": "https://www.linkedin.com/in/bo-chen"}}
+            for n in range(1, len(broken["steps"]) + 1)]
+        hub = builder_hub(ListBrowser(), [steps + [
             {"fail": "The page has no such button."},
         ]], {"reply": "", "tasks": [{"title": "B", "kind": "build", "url": SEARCH, "goal": "Build it",
-                                     "build": {"name": "Broken"}}]})
+                                     "build": {"name": "Broken"}}]}, tmp_path)
         await hub.handle(send("make it"))
         task = next(iter(hub.tasks.values()))
         await run_task(hub, task)
-        test = hub.made[0]["session"].prompts[1]
+        test = hub.made[0]["session"].prompts[-1]
         assert "Testing the steps for one item: https://www.linkedin.com/in/bo-chen" in test
         assert "copied “Bo” as {{first_name}}" in test
         assert "4. Click “Send InMail”: FAILED, couldn't find it on the page" in test
         assert "- button: Message" in test and "- h1: Bo Chen" in test
+        assert task.build_journal.state["failed_step"] == 4
+        assert task.build_journal.state["validated_prefix"] == 3
         assert task.status == "failed" and not hub.scripts.list()
     asyncio.run(main())
 
@@ -685,7 +911,7 @@ def test_a_row_is_added_to_the_spreadsheet_with_the_page_and_copied_values():
             if command == "ghost_tab_list":
                 return True, {"tabs": [{"id": 91, "url": "https://www.linkedin.com/in/ana/?mini=1", "active": True}]}
             if command == "ghost_sheet_append":
-                assert args["tab_id"] == 91  # its own tab, opened for the sheet
+                assert args["tab_id"] == 92  # its own tab, opened for the sheet
                 appended.append(args)
                 return True, {"added": True, "row": 590}
             return await browser(command, args)
@@ -743,3 +969,27 @@ def test_a_drop_down_can_list_a_column_of_the_spreadsheet(tmp_path):
     assert store.get(item["id"])["inputs"][1]["column"] == "Source / Campaign"
     assert store.set_column(item["id"], "campaign", "") and "column" not in store.get(item["id"])["inputs"][1]
     assert not store.set_column(item["id"], "sheet_url", "A")
+
+
+def test_failed_next_button_read_does_not_claim_list_completion():
+    async def main():
+        browser = ListBrowser()
+        hub = play_hub(browser)
+        item = hub.scripts.add(clean({**LOOP, "steps": LOOP["steps"][:3]}))
+        original = browser.__call__
+
+        async def call(command, args):
+            # The first full-page read after restoring the list checks Next.
+            # Scoped list reads succeed; the independent Next lookup loses connection.
+            if command == 'ghost_read' and args.get('max_chars') == 8000 and 'search' in browser.url:
+                return False, 'extension disconnected'
+            return await original(command, args)
+
+        hub.call = call
+        task = await hub.play(item, {'template': 'unused'})
+        await asyncio.wait_for(task.job, 3)
+        assert task.status == 'failed', task.result
+        assert "couldn't check the next-page button: extension disconnected" in task.result
+        assert len(hub.scripts.get(item['id'])['done']) == 2
+
+    asyncio.run(main())

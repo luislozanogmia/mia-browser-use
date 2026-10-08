@@ -643,7 +643,12 @@ class BridgeServer:
         """A chat worker's browser call: the same path, checks and room announcements as any actor."""
         if command == "ghost_eval":
             return False, "ghost_eval is never available to chat workers"
-        return await self.execute(command, args, 45)
+        # Sheet exports may need bounded read-only backoff after HTTP 429.
+        # Keep the command alive while Chrome verifies a single dispatched paste.
+        timeout = 180 if command == "ghost_sheet_append" else 90 if command in {
+            "ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_sheet_columns"
+        } else 45
+        return await self.execute(command, args, timeout)
 
     async def _chat_retire(self, actor_id):
         if self.room:

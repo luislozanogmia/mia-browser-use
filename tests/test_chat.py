@@ -306,7 +306,8 @@ def test_parallel_tasks_get_their_own_tabs_and_never_eval():
 
 def test_stop_cancels_a_waiting_task():
     async def main():
-        hub, browser, _, _ = make_hub([[{"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?"}]],
+        hub, browser, _, _ = make_hub([[{"tool": "ghost_read", "args": {}},
+                                      {"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?"}]],
                                       plan={"tasks": [{"title": "T", "goal": "g", "url": ""}]})
         await hub.handle(send("x", mode="do"))
         task = next(iter(hub.tasks.values()))
@@ -419,10 +420,7 @@ def test_tasks_on_one_tab_wait_for_each_other():
             await asyncio.sleep(0)
         assert started == [] and hub.tasks["task-1"].status == "waiting"
         agent.lock.release()
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if hub.tasks["task-1"].status == "done":
-                break
+        await asyncio.wait_for(hub.tasks["task-1"].job, 5)
         assert started == ["a1"]
     asyncio.run(run())
 
@@ -445,8 +443,7 @@ def test_a_question_answered_from_context_starts_no_task_and_sees_what_was_expla
         hub.plan_run = planner
         hub.make_bot = lambda agent: FakeBot(agent, [("Fractional", "Part-time role.")])
         await hub.explain({"id": "a1", "question": "Explain this.", "text": "Fractional"}, 5, "https://mail.example/")
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await asyncio.wait_for(next(iter(hub.tasks.values())).job, timeout=2)
         await hub.handle(send("so is this full time?"))
         assert len(hub.tasks) == 1 and hub.messages[-1]["text"] == "It means part-time."
         assert "Fractional. Part-time role." in prompts[0]  # the planner sees the tab's earlier answer
@@ -896,7 +893,8 @@ def test_a_bot_that_fails_or_is_stopped_still_reports_what_it_found():
         assert task.status == "failed"
         assert "model crashed" in task.result and "https://x.example/ana" in task.result and "https://x.example/bo" in task.result
 
-        hub, _, _, _ = make_hub([[{"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?", "found": "Cy · https://x.example/cy"}]],
+        hub, _, _, _ = make_hub([[{"tool": "ghost_read", "args": {}},
+                                {"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?", "found": "Cy · https://x.example/cy"}]],
                                 plan={"tasks": [{"title": "T", "goal": "g"}]})
         await hub.handle(send("x", mode="do"))
         task = next(iter(hub.tasks.values()))
@@ -925,4 +923,18 @@ def test_alone_a_bot_takes_the_tab_without_asking():
         assert task.status == "done" and task.question == ""
         clicks = [a for c, a in browser.calls if c == "ghost_click"]
         assert clicks and clicks[0]["human_ok"] is True
+    asyncio.run(main())
+
+
+def test_planner_timeout_clears_published_busy_state_and_creates_no_task():
+    async def main():
+        hub, browser, states, sessions = make_hub([])
+        async def timeout(model, prompt):
+            raise asyncio.TimeoutError()
+        hub.plan_run = timeout
+        await hub.send(send("Build an automation"))
+        assert any(state["planning"] for state in states)
+        assert states[-1]["planning"] is False
+        assert not hub.tasks
+        assert "The model took too long to answer" in hub.messages[-1]["text"]
     asyncio.run(main())

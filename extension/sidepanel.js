@@ -12,6 +12,8 @@ const tabTitles = new Map();
 let state = null;
 let connected = false;
 let sending = false;
+let connectionEpoch = 0;
+let developmentReloadEnabled = false;
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -47,19 +49,37 @@ function setStatus(text, bad = false) {
   status.classList.toggle("bad", bad);
 }
 
+function isConnectionStatus(text) {
+  return text.startsWith("Not connected") || text.startsWith("Mia Browser is not running.");
+}
+
+function connectionRecovered() {
+  connectionEpoch++;
+  if (isConnectionStatus(status.textContent)) setStatus("");
+}
+
 // -- talking to the background ----------------------------------------------------
 
 function chat(action, extra = {}) {
   return new Promise(resolve => {
+    let settled = false;
+    const started = connectionEpoch;
     // Never wait forever: say so when the background doesn't answer.
     const timer = setTimeout(() => {
-      setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
-      resolve({ ok: false });
+      settled = true;
+      const error = "No acknowledgement yet. Check the task's status before trying again.";
+      if (started === connectionEpoch) setStatus(error, true);
+      resolve({ ok: false, error });
     }, 15000);
     chrome.runtime.sendMessage({ type: "chat", action, ...extra }, reply => {
+      const runtimeError = chrome.runtime.lastError?.message;
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message || (reply?.ok ? "" : reply?.error || "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome");
-      if (error) setStatus(error, true);
+      const error = runtimeError || (reply?.ok ? "" : reply?.error || "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome");
+      if (error) {
+        if (!isConnectionStatus(error) || started === connectionEpoch) setStatus(error, true);
+      } else connectionRecovered();
       resolve(error ? { ok: false, error } : reply);
     });
   });
@@ -84,7 +104,7 @@ function render(next) {
   renderClaude(state.claude);
   if (!$("history").hidden) renderHistory();
   if (!$("plays").hidden) renderPlays();
-  if (connected && status.textContent.startsWith("Not connected")) setStatus("");
+  if (connected) connectionRecovered();
 }
 
 // Mia runs on the person's Claude account; offer to set it up when it isn't ready.
@@ -169,6 +189,22 @@ function renderLog(messages) {
 const LIVE = ["waiting", "working", "needs_you"];
 
 // One row per agent (one per tab): its face, the tab's name and what it's doing. Open it for its tasks.
+function buildProgressText(t) {
+  const p = t.build_progress;
+  if (!p) return "";
+  const parts = [];
+  if (p.uncertain_action) parts.push(p.destination_observed
+    ? "Destination observed · resume needs verification"
+    : "Write outcome unknown · check destination before retrying");
+  else if (p.failed_step) parts.push(`Repair step ${p.failed_step}`);
+  else if (p.pending_steps?.length) parts.push(`Step ${p.pending_steps[0]} needs a live test`);
+  parts.push(`${p.verified} step${p.verified === 1 ? "" : "s"} verified`);
+  if (p.planned_steps) parts.push(`${p.planned_steps} planned`);
+  if (p.reviews_passed?.includes("adversarial")) parts.push("Reuse review passed");
+  if (p.reviews_passed?.includes("human")) parts.push("Usability review passed");
+  return parts.join(" · ");
+}
+
 function renderTasks(tasks, agents) {
   $("tasks").hidden = !tasks.length;
   if (!tasks.length) return;
@@ -180,16 +216,21 @@ function renderTasks(tasks, agents) {
     groups.get(key).tasks.push(t);
   }
   const finished = tasks.filter(t => !LIVE.includes(t.status)).length;
-  $("taskSum").textContent = `${groups.size} bot${groups.size === 1 ? "" : "s"} · ${finished} of ${tasks.length} finished`;
+  const builds = tasks.filter(t => t.build_id).length;
+  $("tasksLabel").textContent = builds === tasks.length ? "Mia's builds" : builds ? "Tasks" : "Bots";
+  $("taskSum").textContent = builds ? `${finished} of ${tasks.length} finished`
+    : `${groups.size} bot${groups.size === 1 ? "" : "s"} · ${finished} of ${tasks.length} finished`;
   $("stopAll").hidden = finished === tasks.length;
   const rows = [];
   for (const { key, agent, tasks: list } of groups.values()) {
     const now = list.find(t => t.status === "needs_you") || list.find(t => t.status === "working")
       || list.find(t => t.status === "waiting") || list[list.length - 1];
     const expanded = openAgents.has(key);
-    const head = el("button", { className: `agent${expanded ? " open" : ""}`, ariaExpanded: String(expanded) },
+    const head = el("button", { className: `agent${expanded ? " open" : ""}`, ariaExpanded: String(expanded),
+                               title: now.build_id ? buildProgressText(now) : "" },
       mote(agent.color, `sm${now.status === "working" ? " working" : ""}`),
-      el("span", { className: "what" }, el("b", { textContent: tabName(agent) })),
+      el("span", { className: "what" }, el("b", { textContent: now.build_id ? `Mia · ${now.title}` : tabName(agent) }),
+        now.build_id ? el("small", { textContent: buildProgressText(now) }) : null),
       el("span", { className: `pill ${now.status}`, textContent: STATUS_WORDS[now.status] || now.status }),
       el("span", { className: "chev", textContent: "›", ariaHidden: "true" }));
     head.addEventListener("click", () => { expanded ? openAgents.delete(key) : openAgents.add(key); renderTasks(tasks, agents); });
@@ -203,6 +244,7 @@ function renderTasks(tasks, agents) {
       const isLive = LIVE.includes(t.status);
       const row = el("button", { className: `task sub ${t.status}`, title: t.tab_id ? "Show this tab" : "" },
         el("span", { className: "what" }, el("b", { textContent: t.title }),
+          t.build_id ? el("small", { textContent: buildProgressText(t) }) : null,
           el("small", { textContent: (isLive ? t.note : t.result) || "" })),
         el("span", { className: `pill ${t.status}`, textContent: STATUS_WORDS[t.status] || t.status }));
       row.addEventListener("click", () => showTab(t.tab_id));
@@ -380,7 +422,8 @@ $("claudeBtn").addEventListener("click", () => { $("claudeBtn").disabled = true;
 
 // -- Play Automations: scripts Mia Browser replays click by click, no AI ----------------------
 
-const openPlays = new Set();  // automations whose details are shown
+const openPlays = new Set();  // automations being edited explicitly with the pencil
+const runPlays = new Set();  // automations whose run inputs are shown
 const playInputs = new Map();  // what the person typed in an automation's boxes, kept across redraws and reloads
 const playProblem = new Map();  // why Play didn't start, shown under the automation's button
 const sheetCache = new Map();  // spreadsheet link -> its columns, read once per panel (↻ reads it again)
@@ -419,35 +462,44 @@ function renderPlays() {
   }
   $("playList").replaceChildren(...plays.map(a => {
     const open = openPlays.has(a.id);
+    const runOpen = runPlays.has(a.id);
     // Only a schedule or a pause is worth a second line; "runs when you press Play" is what ▶ says.
     const line = a.running ? "Running…" : a.paused ? `Paused · ${a.schedule}` : a.scheduled ? a.schedule : "";
     const run = el("button", { className: "icon play-run" + (a.running ? " stop" : ""), textContent: a.running ? "■" : "▶",
       title: a.running ? "Stop" : "Play", ariaLabel: `${a.running ? "Stop" : "Play"} ${a.name}` });
-    run.addEventListener("click", () => {
+    const startPlay = () => {
       if (a.running) { chat("stop", { task: a.task }); return; }
       const values = playInputs.get(a.id) || {};
       const empty = (a.inputs || []).find(input => !String(values[input.name] || "").trim());
       if (empty) {
-        // Said inside its edit view, opened for it: the chat's status line is hidden while the automations are open.
-        playProblem.set(a.id, `Write your “${empty.label}” first, then press Play.`);
-        openPlays.add(a.id);
+        // Keep the run form visible so the missing value can be supplied immediately.
+        playProblem.set(a.id, `Enter ${empty.label.toLowerCase()} to run.`);
+        openPlays.delete(a.id);
+        runPlays.add(a.id);
         renderPlays();
         return;
       }
-      playProblem.delete(a.id);
+      if (playProblem.delete(a.id)) renderPlays();
       chat("play", { automation: a.id, inputs: values }).then(reply => {
-        if (!reply.ok) { playProblem.set(a.id, reply.error || "Mia Browser didn't answer. Try again."); openPlays.add(a.id); renderPlays(); }
+        if (!reply.ok) { playProblem.set(a.id, reply.error || "Mia Browser didn't answer. Try again."); openPlays.delete(a.id); runPlays.add(a.id); renderPlays(); }
       });
+    };
+    run.addEventListener("click", () => {
+      if (a.running || !(a.inputs || []).length) { startPlay(); return; }
+      openPlays.delete(a.id);
+      runPlays.add(a.id);
+      playProblem.delete(a.id);
+      renderPlays();
     });
     const edit = el("button", { className: "icon play-edit" + (open ? " on" : ""), textContent: "✎",
       title: open ? "Close" : "Edit", ariaLabel: `${open ? "Close" : "Edit"} ${a.name}`, ariaExpanded: String(open) });
-    edit.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
+    edit.addEventListener("click", () => { runPlays.delete(a.id); open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
     const row = el("div", { className: "play-row" },
       el("span", { className: "state" + (a.running ? " running" : a.paused ? " paused" : "") }),
       el("span", { className: "what" }, el("b", { textContent: a.name }), line ? el("small", { textContent: line }) : ""),
       run, edit);
-    const item = el("div", { className: "play" + (open ? " open" : "") }, row);
-    if (!open) return item;
+    const item = el("div", { className: "play" + (open || runOpen ? " open" : "") }, row);
+    if (!open && !runOpen) return item;
     const name = el("input", { type: "text", value: a.name, maxLength: 60, ariaLabel: "Name" });
     const rename = () => {
       const value = name.value.trim();
@@ -483,7 +535,10 @@ function renderPlays() {
         const fromSheet = at >= 0 ? sheet.values[at] : [];
         const extra = input.choices.filter(c => !fromSheet.includes(c));
         const choices = [...fromSheet, ...extra];
-        const picked = choices.includes(typed[input.name]) ? typed[input.name] : (choices[0] || "");
+        // A sheet-backed choice list is temporarily empty while its CSV loads.
+        // Keep the last selection until the actual column values are available.
+        const picked = choices.includes(typed[input.name]) ? typed[input.name]
+          : column && !ready ? (typed[input.name] || choices[0] || "") : (choices[0] || "");
         if (picked !== (typed[input.name] ?? "")) remember(input.name, picked);
         const columnBox = el("select", { ariaLabel: `Column for ${input.label}` },
           el("option", { value: "", textContent: !link ? "Put the spreadsheet link first" : sheet.loading ? "Reading the sheet…"
@@ -521,10 +576,12 @@ function renderPlays() {
           chat("automation_choices", { automation: a.id, input: input.name, choices: input.choices.filter(c => c !== picked) });
         });
         return boxFor[input.name] = el("div", { className: "play-input" }, el("span", { textContent: input.label }),
-          el("div", { className: "play-choice" }, columnBox, reread),
-          el("div", { className: "play-choice" }, select, add, del));
+          ...(open ? [el("div", { className: "play-choice" }, columnBox, reread)] : []),
+          el("div", { className: "play-choice" }, select, ...(open ? [add, del] : [])));
       }
-      const box = el("textarea", { rows: 3, value: typed[input.name] ?? "", placeholder: "Use {{first_name}} or other copied values" });
+      const urlInput = /(?:^|[^a-z])(?:url|link)(?:$|[^a-z])/i.test(`${input.name} ${input.label}`);
+      const box = el(urlInput ? "input" : "textarea", { ...(urlInput ? { type: "url" } : { rows: 3 }), value: typed[input.name] ?? "",
+        placeholder: urlInput ? "https://…" : `Enter ${input.label.toLowerCase()}` });
       box.addEventListener("input", () => {
         playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [input.name]: box.value });
         saveInputs();
@@ -533,6 +590,22 @@ function renderPlays() {
       if (input.name === a.sheet_input) box.addEventListener("change", () => renderPlays());
       return boxFor[input.name] = el("label", { className: "play-input" }, el("span", { textContent: input.label }), box);
     });
+    if (!open) {
+      const submit = el("button", { type: "submit", className: "run", textContent: a.running ? "Running…" : "Run" });
+      submit.disabled = !!a.running;
+      const cancel = el("button", { type: "button", textContent: "Cancel" });
+      cancel.addEventListener("click", () => { runPlays.delete(a.id); playProblem.delete(a.id); renderPlays(); });
+      const form = el("form", { className: "play-detail play-run-form" }, ...boxes,
+        playProblem.has(a.id) ? el("p", { className: "last failed", role: "alert", textContent: playProblem.get(a.id) }) : "",
+        el("div", { className: "play-actions" }, submit, cancel));
+      form.addEventListener("submit", event => {
+        event.preventDefault();
+        document.activeElement?.blur?.();
+        startPlay();
+      });
+      item.append(form);
+      return item;
+    }
     const shown = new Set();
     const steps = a.steps.map((step, i) => {
       const remove = el("button", { className: "icon step-del", textContent: "×", title: "Delete this step", ariaLabel: `Delete step ${i + 1}` });
@@ -568,7 +641,7 @@ function renderPlays() {
     }
     const del = el("button", { className: "del", textContent: "Delete" });
     del.addEventListener("click", () => {
-      if (confirm(`Delete the Play Automation “${a.name}”?`)) { openPlays.delete(a.id); chat("automation_delete", { automation: a.id }); }
+      if (confirm(`Delete the Play Automation “${a.name}”?`)) { openPlays.delete(a.id); runPlays.delete(a.id); chat("automation_delete", { automation: a.id }); }
     });
     actions.append(del);
     const last = lastRun(a.last_run);
@@ -615,6 +688,9 @@ function toggleSettings(open) {
 
 function updateSettings(info) {
   const on = Boolean(info.connected);
+  developmentReloadEnabled = info.developmentReload?.enabled === true;
+  $("developmentReloadBox").hidden = info.developmentReload?.available !== true;
+  $("developmentReload").checked = info.developmentReload?.enabled === true;
   connected = on;
   $("openPlays").classList.toggle("off", !on);
   $("openPlays").title = on ? "Play Automations" : "Play Automations · Mia Browser is not running";
@@ -659,7 +735,7 @@ function updateSettings(info) {
   $("shareBtn").hidden = Boolean(info.tab_shared);
   $("unshareBtn").hidden = !info.tab_shared;
   if (!on) setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
-  else if ($("status").textContent.startsWith("Not connected")) setStatus("");
+  else connectionRecovered();
 }
 
 function refreshSettings() {
@@ -737,3 +813,28 @@ setInterval(refreshSettings, 5000);
   refreshSettings();
   input.focus();
 })();
+
+// A live, empty panel is required: closed/stale panels and drafts fail closed.
+const developmentIdlePort = chrome.runtime.connect({ name: "mia-development-idle" });
+function developmentPanelClean() {
+  return !sending && !renaming && !input.value.trim()
+    && !(document.activeElement !== input && document.activeElement?.matches("input, textarea, select, [contenteditable=true]"))
+    && $("settings").hidden && $("plays").hidden;
+}
+const developmentFreeze = new MiaDevelopmentReload.PanelFreeze({
+  document, clean: developmentPanelClean,
+  ack: message => developmentIdlePort.postMessage(message),
+});
+developmentIdlePort.onMessage.addListener(message => developmentFreeze.receive(message));
+developmentIdlePort.onDisconnect.addListener(() => developmentFreeze.release());
+function reportDevelopmentIdle() {
+  try { developmentIdlePort.postMessage({ clean: developmentPanelClean() }); } catch {}
+}
+document.addEventListener("input", reportDevelopmentIdle, true);
+document.addEventListener("click", () => queueMicrotask(reportDevelopmentIdle), true);
+setInterval(() => {
+  reportDevelopmentIdle();
+  if (developmentReloadEnabled && connected && !sending) chat("sync");
+}, 1000);
+$("developmentReload").addEventListener("change", event =>
+  setting({ type: "development-reload", enabled: event.target.checked }));

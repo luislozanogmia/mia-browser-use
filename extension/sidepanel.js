@@ -53,12 +53,12 @@ function chat(action, extra = {}) {
   return new Promise(resolve => {
     // Never wait forever: say so when the background doesn't answer.
     const timer = setTimeout(() => {
-      setStatus("Ghost didn't answer. Reload the extension on chrome://extensions.", true);
+      setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
       resolve({ ok: false });
     }, 15000);
     chrome.runtime.sendMessage({ type: "chat", action, ...extra }, reply => {
       clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message || (reply?.ok ? "" : reply?.error || "No answer from Ghost");
+      const error = chrome.runtime.lastError?.message || (reply?.ok ? "" : reply?.error || "Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome");
       if (error) setStatus(error, true);
       resolve(error ? { ok: false, error } : reply);
     });
@@ -76,13 +76,13 @@ chrome.runtime.onMessage.addListener(msg => {
 
 function render(next) {
   state = next;
-  renderRoom(state.room);
   renderModels(state.models);
   renderLog(state.messages || []);
   renderTasks(state.tasks || [], state.agents || []);
   renderApprovals((state.tasks || []).filter(t => t.status === "needs_you"));
   renderClaude(state.claude);
   if (!$("history").hidden) renderHistory();
+  if (!$("plays").hidden) renderPlays();
   if (connected && status.textContent.startsWith("Not connected")) setStatus("");
 }
 
@@ -98,30 +98,6 @@ function renderClaude(claude) {
     : "Mia answers with your Claude account. Sign in once and you're set.";
   $("claudeBtn").hidden = Boolean(busy);
   $("claudeBtn").textContent = claude.installed ? "Sign in to Claude" : "Set up Claude";
-}
-
-// What the room is called in this panel. Only a label: the room itself (what others join) keeps its id.
-let roomNames = {};
-let renaming = false;
-const roomLabel = room => roomNames[room.name] || "Room 1";
-
-function renderRoom(room) {
-  if (renaming) return;  // the pill is a text box right now
-  const pill = $("room"), faces = $("faces");
-  pill.hidden = !room;
-  faces.replaceChildren();
-  if (!room) return;
-  const people = room.members || [];
-  // People and bots counted apart: "1 person · 2 bots", not "3 here".
-  const humans = people.filter(m => m.kind !== "bot").length, bots = people.length - humans;
-  pill.textContent = `${roomLabel(room)} · ${humans} ${humans === 1 ? "person" : "people"}` +
-    (bots ? ` · ${bots} bot${bots === 1 ? "" : "s"}` : "");
-  pill.title = `Room “${room.name}”. Click to rename it here.`;
-  for (const m of people.slice(0, 6)) {
-    const dot = el("span", { title: m.name });
-    dot.style.background = /^#[0-9a-fA-F]{3,8}$/.test(m.color) ? m.color : "#B4B2A9";
-    faces.append(dot);
-  }
 }
 
 function renderModels(models) {
@@ -303,34 +279,6 @@ input.addEventListener("keydown", event => {
   }
 });
 $("stopAll").addEventListener("click", () => chat("stop_all"));
-// Click the room's name to rename it: Enter or clicking away saves, Esc cancels.
-$("room").addEventListener("click", () => {
-  const room = state?.room;
-  if (!room || renaming) return;
-  renaming = true;
-  const pill = $("room");
-  const box = el("input", { className: "room-pill", value: roomLabel(room), maxLength: 40, ariaLabel: "Room name" });
-  let done = false;
-  const finish = save => {
-    if (done) return;
-    done = true;
-    const name = box.value.trim();
-    if (save && name) {
-      roomNames = { ...roomNames, [room.name]: name };
-      chrome.storage.local.set({ roomNames });
-    }
-    box.replaceWith(pill);
-    renaming = false;
-    renderRoom(state?.room);
-  };
-  box.addEventListener("keydown", event => {
-    if (event.key === "Enter") finish(true);
-    if (event.key === "Escape") finish(false);
-  });
-  box.addEventListener("blur", () => finish(true));
-  pill.replaceWith(box);
-  box.select();
-});
 // The bots list starts collapsed: just the count until you open it.
 $("tasksToggle").addEventListener("click", () => {
   const open = $("taskRows").hidden;
@@ -351,7 +299,7 @@ function when(ts) {
 function renderHistory() {
   const chats = state?.chats || [];
   if (!chats.length) {
-    $("chatList").replaceChildren(el("p", { className: "empty", textContent: connected ? "No past chats yet." : "Connect to Ghost to see past chats." }));
+    $("chatList").replaceChildren(el("p", { className: "empty", textContent: connected ? "No past chats yet." : "Connect to Mia Browser to see past chats." }));
     return;
   }
   $("chatList").replaceChildren(...chats.map(c => {
@@ -367,7 +315,7 @@ function renderHistory() {
 }
 
 function toggleHistory(open) {
-  if (open) toggleSettings(false);
+  if (open) { toggleSettings(false); togglePlays(false); }
   document.body.classList.toggle("in-history", open);
   $("history").hidden = !open;
   $("openHistory").setAttribute("aria-expanded", String(open));
@@ -377,10 +325,234 @@ $("openHistory").addEventListener("click", () => toggleHistory($("history").hidd
 $("closeHistory").addEventListener("click", () => toggleHistory(false));
 $("claudeBtn").addEventListener("click", () => { $("claudeBtn").disabled = true; chat("claude_setup").finally(() => { $("claudeBtn").disabled = false; }); });
 
+// -- Play Automations: scripts Mia Browser replays click by click, no AI ----------------------
+
+const openPlays = new Set();  // automations whose details are shown
+const playInputs = new Map();  // what the person typed in an automation's boxes, kept across redraws and reloads
+const playProblem = new Map();  // why Play didn't start, shown under the automation's button
+const sheetCache = new Map();  // spreadsheet link -> its columns, read once per panel (↻ reads it again)
+
+function sheetData(link) {
+  if (!sheetCache.has(link)) {
+    sheetCache.set(link, { loading: true });
+    chrome.runtime.sendMessage({ type: "sheet-columns", sheet: link }, reply => {
+      const error = chrome.runtime.lastError?.message || (reply?.headers ? "" : reply?.error || "no answer");
+      sheetCache.set(link, error ? { error } : { headers: reply.headers, values: reply.values });
+      renderPlays();
+    });
+  }
+  return sheetCache.get(link);
+}
+
+function saveInputs() {
+  chrome.storage.local.set({ playInputs: Object.fromEntries(playInputs) }).catch(() => {});
+}
+
+function lastRun(last) {
+  if (!last?.at) return "";
+  const word = { done: "Last run", failed: "Last run failed", stopped: "Last run stopped" }[last.status] || "Last run";
+  return `${word} ${when(last.at)}${last.status === "failed" && last.note ? `: ${last.note}` : ""}`;
+}
+
+function renderPlays() {
+  // Don't redraw under the person's cursor while they type in a box.
+  if (document.activeElement?.closest?.("#playList textarea, #playList input")) return;
+  const plays = state?.automations || [];
+  if (!plays.length) {
+    $("playList").replaceChildren(el("p", { className: "empty", textContent: connected
+      ? "No Play Automations yet. Press + and tell Mia what to do, step by step. She does it once, then saves it."
+      : "Connect to Mia Browser to see your Play Automations." }));
+    return;
+  }
+  $("playList").replaceChildren(...plays.map(a => {
+    const open = openPlays.has(a.id);
+    // Only a schedule or a pause is worth a second line; "runs when you press Play" is what ▶ says.
+    const line = a.running ? "Running…" : a.paused ? `Paused · ${a.schedule}` : a.scheduled ? a.schedule : "";
+    const run = el("button", { className: "icon play-run" + (a.running ? " stop" : ""), textContent: a.running ? "■" : "▶",
+      title: a.running ? "Stop" : "Play", ariaLabel: `${a.running ? "Stop" : "Play"} ${a.name}` });
+    run.addEventListener("click", () => {
+      if (a.running) { chat("stop", { task: a.task }); return; }
+      const values = playInputs.get(a.id) || {};
+      const empty = (a.inputs || []).find(input => !String(values[input.name] || "").trim());
+      if (empty) {
+        // Said inside its edit view, opened for it: the chat's status line is hidden while the automations are open.
+        playProblem.set(a.id, `Write your “${empty.label}” first, then press Play.`);
+        openPlays.add(a.id);
+        renderPlays();
+        return;
+      }
+      playProblem.delete(a.id);
+      chat("play", { automation: a.id, inputs: values }).then(reply => {
+        if (!reply.ok) { playProblem.set(a.id, reply.error || "Mia Browser didn't answer. Try again."); openPlays.add(a.id); renderPlays(); }
+      });
+    });
+    const edit = el("button", { className: "icon play-edit" + (open ? " on" : ""), textContent: "✎",
+      title: open ? "Close" : "Edit", ariaLabel: `${open ? "Close" : "Edit"} ${a.name}`, ariaExpanded: String(open) });
+    edit.addEventListener("click", () => { open ? openPlays.delete(a.id) : openPlays.add(a.id); renderPlays(); });
+    const row = el("div", { className: "play-row" },
+      el("span", { className: "state" + (a.running ? " running" : a.paused ? " paused" : "") }),
+      el("span", { className: "what" }, el("b", { textContent: a.name }), line ? el("small", { textContent: line }) : ""),
+      run, edit);
+    const item = el("div", { className: "play" + (open ? " open" : "") }, row);
+    if (!open) return item;
+    const name = el("input", { type: "text", value: a.name, maxLength: 60, ariaLabel: "Name" });
+    const rename = () => {
+      const value = name.value.trim();
+      if (!value) { name.value = a.name; return; }
+      if (value !== a.name) chat("automation_rename", { automation: a.id, name: value });
+    };
+    name.addEventListener("change", rename);
+    name.addEventListener("keydown", event => {
+      if (event.key === "Enter") { event.preventDefault(); name.blur(); }
+      if (event.key === "Escape") { name.value = a.name; name.blur(); }
+    });
+    const typed = playInputs.get(a.id) || {};
+    const boxFor = {};
+    const remember = (name, value) => {
+      playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [name]: value });
+      saveInputs();
+    };
+    const boxes = (a.inputs || []).map(input => {
+      if (Array.isArray(input.choices)) {
+        // A drop-down: the different values of one column of the automation's spreadsheet (most used first),
+        // plus the ones added here that aren't in the sheet yet. The last one picked stays picked.
+        const link = String(typed[a.sheet_input] || "").trim();
+        const sheet = link ? sheetData(link) : null;
+        const ready = sheet && !sheet.loading && !sheet.error;
+        let column = input.column || "";
+        if (ready && !column) {
+          // First time: the column whose header shares a word with the box's label ("Source / Campaign").
+          const words = input.label.toLowerCase().match(/[a-z]{4,}/g) || [];
+          column = sheet.headers.find(h => words.some(w => h.toLowerCase().includes(w))) || "";
+          if (column) chat("automation_column", { automation: a.id, input: input.name, column });
+        }
+        const at = ready ? sheet.headers.indexOf(column) : -1;
+        const fromSheet = at >= 0 ? sheet.values[at] : [];
+        const extra = input.choices.filter(c => !fromSheet.includes(c));
+        const choices = [...fromSheet, ...extra];
+        const picked = choices.includes(typed[input.name]) ? typed[input.name] : (choices[0] || "");
+        if (picked !== (typed[input.name] ?? "")) remember(input.name, picked);
+        const columnBox = el("select", { ariaLabel: `Column for ${input.label}` },
+          el("option", { value: "", textContent: !link ? "Put the spreadsheet link first" : sheet.loading ? "Reading the sheet…"
+            : sheet.error ? "Couldn't read the sheet" : "Pick a column" }),
+          ...(ready ? sheet.headers.map((h, i) => h && el("option", { value: h, textContent: `${String.fromCharCode(65 + i)} · ${h}`,
+            selected: h === column })).filter(Boolean) : []));
+        columnBox.disabled = !ready;
+        columnBox.addEventListener("change", () => chat("automation_column", { automation: a.id, input: input.name, column: columnBox.value }));
+        const reread = el("button", { className: "icon", textContent: "↻", title: "Read the sheet again", ariaLabel: "Read the sheet again" });
+        reread.disabled = !link;
+        reread.addEventListener("click", event => { event.preventDefault(); sheetCache.delete(link); renderPlays(); });
+        const select = el("select", { ariaLabel: input.label },
+          ...(choices.length ? choices.map(c => el("option", { value: c, textContent: c, selected: c === picked }))
+                             : [el("option", { value: "", textContent: "Add one with ＋" })]));
+        select.disabled = !choices.length;
+        select.addEventListener("change", () => remember(input.name, select.value));
+        const add = el("button", { className: "icon", textContent: "＋", title: `Add to ${input.label}`, ariaLabel: `Add to ${input.label}` });
+        add.addEventListener("click", event => {
+          event.preventDefault();
+          const value = (prompt(`New value for “${input.label}”:`) || "").trim().slice(0, 100);
+          if (!value) return;
+          remember(input.name, value);
+          if (!choices.includes(value)) chat("automation_choices", { automation: a.id, input: input.name, choices: [...input.choices, value] });
+          else renderPlays();
+        });
+        // Only the ones added here can be deleted: the sheet's come back while they're in the column.
+        const mine = input.choices.includes(picked) && !fromSheet.includes(picked);
+        const del = el("button", { className: "icon", textContent: "×", ariaLabel: `Delete ${picked}`,
+          title: mine ? `Delete “${picked}”` : picked ? "This one comes from the sheet" : "" });
+        del.disabled = !mine;
+        del.addEventListener("click", event => {
+          event.preventDefault();
+          if (!mine || !confirm(`Delete “${picked}” from ${input.label}?`)) return;
+          remember(input.name, choices.find(c => c !== picked) || "");
+          chat("automation_choices", { automation: a.id, input: input.name, choices: input.choices.filter(c => c !== picked) });
+        });
+        return boxFor[input.name] = el("div", { className: "play-input" }, el("span", { textContent: input.label }),
+          el("div", { className: "play-choice" }, columnBox, reread),
+          el("div", { className: "play-choice" }, select, add, del));
+      }
+      const box = el("textarea", { rows: 3, value: typed[input.name] ?? "", placeholder: "Use {{first_name}} or other copied values" });
+      box.addEventListener("input", () => {
+        playInputs.set(a.id, { ...(playInputs.get(a.id) || {}), [input.name]: box.value });
+        saveInputs();
+      });
+      // A new spreadsheet link: the drop-downs read its columns.
+      if (input.name === a.sheet_input) box.addEventListener("change", () => renderPlays());
+      return boxFor[input.name] = el("label", { className: "play-input" }, el("span", { textContent: input.label }), box);
+    });
+    const shown = new Set();
+    const steps = a.steps.map((step, i) => {
+      const remove = el("button", { className: "icon step-del", textContent: "×", title: "Delete this step", ariaLabel: `Delete step ${i + 1}` });
+      remove.addEventListener("click", () => {
+        if (confirm(`Delete step ${i + 1}, “${step}”?`)) chat("automation_step_delete", { automation: a.id, step: i });
+      });
+      // The box this step types goes right under it.
+      const own = (a.inputs || []).map(input => input.name)
+        .filter(name => (a.uses?.[i] || []).includes(name) && boxFor[name] && !shown.has(name));
+      own.forEach(name => shown.add(name));
+      return el("li", {}, el("div", { className: "step" }, el("span", { textContent: step }), remove),
+        ...own.map(name => boxFor[name]));
+    });
+    const rest = (a.inputs || []).filter(input => !shown.has(input.name)).map(input => boxFor[input.name]);
+    const full = el("button", { className: "full" + (a.full_access ? " on" : ""), textContent: a.full_access ? "Full access ✓" : "Full access",
+      ariaPressed: String(!!a.full_access),
+      title: a.full_access ? "Send, Post and the like run without asking when you press Play. Click to ask again."
+                           : "When you press Play, run Send, Post and the like without asking you first" });
+    full.addEventListener("click", () => {
+      if (!a.full_access && !confirm(`Let “${a.name}” click Send, Post and the like without asking, when you press Play?`)) return;
+      chat("automation_full_access", { automation: a.id, on: !a.full_access });
+    });
+    const actions = el("div", { className: "play-actions" }, full);
+    if (a.scheduled) {
+      const pause = el("button", { textContent: a.paused ? "Resume" : "Pause" });
+      pause.addEventListener("click", () => chat(a.paused ? "automation_resume" : "automation_pause", { automation: a.id }));
+      actions.append(pause);
+    }
+    if (a.each && a.done) {
+      const reset = el("button", { textContent: "Start over", title: `Forget the ${a.done} links already done` });
+      reset.addEventListener("click", () => chat("automation_reset", { automation: a.id }));
+      actions.append(reset);
+    }
+    const del = el("button", { className: "del", textContent: "Delete" });
+    del.addEventListener("click", () => {
+      if (confirm(`Delete the Play Automation “${a.name}”?`)) { openPlays.delete(a.id); chat("automation_delete", { automation: a.id }); }
+    });
+    actions.append(del);
+    const last = lastRun(a.last_run);
+    item.append(el("div", { className: "play-detail" },
+      el("label", { className: "play-input play-name" }, el("span", { textContent: "Name" }), name),
+      a.about ? el("p", { textContent: a.about }) : "",
+      el("ol", {}, ...steps),
+      a.each ? el("p", { textContent: `${a.each}, until the list is used up or you press Stop.`
+        + (a.done ? ` ${a.done} done so far; the next run carries on.` : "") }) : "",
+      ...rest,
+      last ? el("p", { className: "last " + (a.last_run?.status || ""), textContent: last }) : "",
+      playProblem.has(a.id) ? el("p", { className: "last failed", role: "alert", textContent: playProblem.get(a.id) }) : "",
+      actions));
+    return item;
+  }));
+}
+
+function togglePlays(open) {
+  if (open) { toggleSettings(false); toggleHistory(false); }
+  document.body.classList.toggle("in-plays", open);
+  $("plays").hidden = !open;
+  $("openPlays").setAttribute("aria-expanded", String(open));
+  if (open) { renderPlays(); chat("sync"); }
+}
+$("openPlays").addEventListener("click", () => togglePlays($("plays").hidden));
+$("closePlays").addEventListener("click", () => togglePlays(false));
+$("newPlay").addEventListener("click", () => {
+  togglePlays(false);
+  input.value = "Make a Play Automation that ";
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+});
+
 // -- settings: what the toolbar popup used to hold --------------------------------------
 
 function toggleSettings(open) {
-  if (open) toggleHistory(false);
+  if (open) { toggleHistory(false); togglePlays(false); }
   document.body.classList.toggle("in-settings", open);
   $("settings").hidden = !open;
   $("openSettings").setAttribute("aria-expanded", String(open));
@@ -391,50 +563,68 @@ function toggleSettings(open) {
 function updateSettings(info) {
   const on = Boolean(info.connected);
   connected = on;
-  $("conn").classList.toggle("on", on);
-  $("conn").title = on ? "Connected to the Ghost bridge" : "Not connected";
+  $("openPlays").classList.toggle("off", !on);
+  $("openPlays").title = on ? "Play Automations" : "Play Automations · Mia Browser is not running";
   $("dot").classList.toggle("on", on);
   $("statusLabel").textContent = on ? "Connected" : "Disconnected";
   $("statusDetail").textContent = on ? `Bridge on port ${info.port}`
-    : info.paired ? "Starting Ghost on this computer…" : "Run ./install-extension.sh once, and Ghost starts by itself after that";
+    : info.paired ? "Starting Mia on this computer…" : setupDetail(info.helper);
+  renderSetup(info);
   if (document.activeElement !== $("port")) $("port").value = info.port;
   $("version").textContent = `Mia v${info.version}`;
   // Pairing is automatic; the manual fields only matter when it hasn't worked.
   $("setup").hidden = on;
   $("disconnectBtn").hidden = !on;
-  $("roomBox").hidden = !(on && info.room);
-  $("followMe").checked = Boolean(info.follow);
+  $("modesBox").hidden = !on;
   $("reelMode").checked = Boolean(info.reel);
   $("immersive").checked = Boolean(info.modes?.immersive);
   $("skipPrompt").checked = Boolean(info.modes?.skip);
   if (document.activeElement !== $("language")) $("language").value = info.language || "English";
-  if (info.room) {
-    const count = info.room.shared.length;
-    $("roomLabel").textContent = `In a room as ${info.room.me.name || info.room.me.id} · ${count} shared page${count === 1 ? "" : "s"}`;
-    const invites = $("roomInvites");
-    invites.replaceChildren();
-    const accepted = new Set(info.room.accepted || []);
-    for (const page of info.room.pages || []) {
-      if (!page?.url || accepted.has(page.url)) continue;
-      const row = el("div", { className: "room-invite" });
-      row.append(el("strong", { textContent: page.title || hostOf(page.origin) || "Shared site" }),
-                 el("small", { textContent: page.href || page.origin }));
-      const actions = el("div", { className: "room-invite-actions" });
-      for (const [label, mode] of [...(page.href ? [["Open page", "new"]] : []), ["Use current tab", "current"]]) {
-        const button = el("button", { type: "button", textContent: label });
-        button.addEventListener("click", () => setting({ type: "accept-shared-page", url: page.url, mode }, 500));
-        actions.append(button);
-      }
-      row.append(actions);
-      invites.append(row);
-    }
-    invites.hidden = !invites.childElementCount;
+  if (!on) setStatus(info.paired || info.helper === "ok" ? "Mia is not running. Close and reopen Chrome, or reload the extension on chrome://extensions"
+    : "Mia isn't set up on this Mac yet. One download finishes it (see above).", true);
+  else if ($("status").textContent.startsWith("Not connected") || $("status").textContent.startsWith("Mia isn't set up")) setStatus("");
+}
+
+function setupDetail(helper) {
+  if (helper === "outdated") return "An older Mia helper is installed; the current installer replaces it";
+  if (helper === "failed") return "The Mia helper didn't answer. Running the installer again fixes it";
+  return "Not set up on this Mac yet";
+}
+
+// The card for the one step the extension can't do itself: the installer.
+const SETUP_STEPS = {
+  mac: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install, then enter your Mac password when asked",
+        "Come back here. This panel turns green on its own"],
+  win: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install. No administrator password is needed",
+        "Come back here. This panel turns green on its own"],
+  linux: ["Open the download (bottom of Chrome, or your Downloads folder)", "Your software installer opens; click Install and enter your password",
+          "Come back here. This panel turns green on its own"],
+};
+const SETUP_WHAT = {
+  mac: "The Mia helper (its own copy of Python and Mia's programs, in /Library/Application Support/Ghost), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and everything is removed by the uninstaller in that folder.",
+  win: "The Mia helper (its own copy of Python and Mia's programs, in your user folder under AppData\\Local\\Mia), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and Mia appears in Windows' Installed apps to uninstall.",
+  linux: "The Mia helper (its own copy of Python and Mia's programs, in /opt/mia-browser-use), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it; remove it with your package manager (mia-browser-use).",
+};
+
+function renderSetup(info) {
+  const paired = Boolean(info.paired) || info.helper === "ok";
+  $("setupCard").hidden = paired;
+  $("downloadBtn").href = info.installer_url || "#";
+  $("downloadBtn").hidden = !info.installer_url;
+  $("setupUnsupported").hidden = Boolean(info.installer_url);
+  const os = SETUP_STEPS[info.os] ? info.os : "mac";
+  $("setupSteps").replaceChildren(...SETUP_STEPS[os].map(text => { const li = document.createElement("li"); li.textContent = text; return li; }));
+  $("setupWhat").textContent = SETUP_WHAT[os];
+  if (info.helper === "outdated") {
+    $("setupTitle").textContent = "Update the Mia helper on this Mac";
+    $("setupText").textContent = "This version of Mia needs a newer helper than the one installed. Download the current installer and run it; your chats and settings stay.";
+  } else if (info.helper === "failed") {
+    $("setupTitle").textContent = "The Mia helper isn't answering";
+    $("setupText").textContent = "Running the installer again puts a fresh copy in place. If it still fails, close and reopen Chrome.";
+  } else {
+    $("setupTitle").textContent = "One more step on this Mac";
+    $("setupText").textContent = "Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and this panel connects by itself.";
   }
-  // Offer only what applies to this tab.
-  $("shareBtn").hidden = Boolean(info.tab_shared);
-  $("unshareBtn").hidden = !info.tab_shared;
-  if (!on) setStatus("Not connected to the Ghost bridge. Open settings to connect.", true);
-  else if ($("status").textContent.startsWith("Not connected")) setStatus("");
 }
 
 function refreshSettings() {
@@ -445,31 +635,11 @@ function refreshSettings() {
 
 function setting(message, delay = 300) {
   $("error").textContent = "";
-  chrome.runtime.sendMessage(message, result => {
-    if ((message.type.endsWith("share-tab") || message.type === "accept-shared-page") && !result?.ok) {
-      $("error").textContent = result?.error || "Could not reach the room";
-    }
-    setTimeout(refreshSettings, delay);
-  });
+  chrome.runtime.sendMessage(message, () => setTimeout(refreshSettings, delay));
 }
 
 $("openSettings").addEventListener("click", () => toggleSettings($("settings").hidden));
 $("closeSettings").addEventListener("click", () => toggleSettings(false));
-$("shareBtn").addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url) return;
-  const shareLink = $("shareFullLink").checked;
-  if (shareLink && !confirm(`Share this full address with everyone in the room?\n\n${tab.url}\n\nIts path or search terms may contain private information.`)) return;
-  setting({ type: "share-tab", share_link: shareLink }, 500);
-});
-$("unshareBtn").addEventListener("click", () => setting({ type: "unshare-tab" }, 500));
-$("followMe").addEventListener("change", () => {
-  if ($("followMe").checked && !confirm("Follow mode shares each active site's name with the room. Page paths and search terms stay private. Continue?")) {
-    $("followMe").checked = false;
-    return;
-  }
-  setting({ type: "follow", on: $("followMe").checked }, 500);
-});
 $("reelMode").addEventListener("change", () => setting({ type: "reel", on: $("reelMode").checked }));
 for (const id of ["immersive", "skipPrompt"]) {
   $(id).addEventListener("change", () => setting({ type: "modes", immersive: $("immersive").checked, skip: $("skipPrompt").checked }));
@@ -487,15 +657,16 @@ $("connectBtn").addEventListener("click", () => {
     setTimeout(() => { refreshSettings(); if (connected) chat("sync"); }, 500);
   });
 });
-// The share button and the connection dot follow the tab and the bridge.
-chrome.tabs.onActivated.addListener(refreshSettings);
+// The connection dot follows the bridge.
 setInterval(refreshSettings, 5000);
 
 // -- start --------------------------------------------------------------------------------
 
 (async () => {
-  const stored = await chrome.storage.local.get(["chatPrefs", "roomNames"]);
-  roomNames = stored.roomNames && typeof stored.roomNames === "object" ? stored.roomNames : {};
+  const stored = await chrome.storage.local.get(["chatPrefs", "playInputs"]);
+  for (const [id, values] of Object.entries(stored.playInputs || {})) {
+    if (values && typeof values === "object") playInputs.set(id, values);
+  }
   const saved = stored.chatPrefs || {};
   if (saved.model) prefs.model = String(saved.model);
   renderChips();

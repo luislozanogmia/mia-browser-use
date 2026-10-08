@@ -1,6 +1,6 @@
 # Mia Browser Use — Product
 
-People and AI bots browse together. A Chrome extension talks to a local bridge, the bridge joins a room, and everyone in the room sees the same shared pages, each other's cursors, and the bots' answers drawn on the page.
+One person and their AI bots browse together on one computer. A Chrome extension talks to a local bridge; every open tab has its own bot, and the bots' answers are drawn on the page. There is no multi-user mode: nothing leaves the Mac for other people to see.
 
 ## What it does today
 
@@ -14,7 +14,7 @@ People and AI bots browse together. A Chrome extension talks to a local bridge, 
 - **Reel.** Every shared page visited and every answer is saved as a screenshot, in order, in this browser only.
 - **Reel to PDF.** The reel's **Make PDF** button turns it into a report. Claude Sonnet 5.5 reads a text-only digest (never the screenshots) and writes the title, summary, three takeaways, chapters, and a short caption per moment. The page lays it out about 70% pictures and 30% text, with no text under 12px. Where a diagram makes a point clearer than a screenshot, the model can ask for one (key numbers, steps, comparisons, bar charts) using only facts from the reel. The print dialog then saves the report as a PDF. Without the bridge or the model, the report is still made, with plain chapters by site.
 
-- **Mia's chat (side panel).** Click the Mia icon in the toolbar, or press Alt+Shift+M. The gear in the panel holds the settings: connection, sharing, Follow me, Reel, Immersive, Skip the question and Language. It always knows the tab you're on and the text you selected (and the links inside it).
+- **Mia's chat (side panel).** Click the Mia icon in the toolbar, or press Alt+Shift+M. The gear in the panel holds the settings: connection, Reel, Immersive, Skip the question and Language. Every open tab is ready for questions; nothing to share or follow. It always knows the tab you're on and the text you selected (and the links inside it).
   - **Ask** reads the page and answers. It never touches the page.
   - **One agent per tab.** Each tab gets one agent (Mia 1, Mia 2…) with its own color and one mote on the page. Everything that happens on that tab is a task of that agent: a selection or crop you ask about, an **Ask** or a **Do** from the chat. An agent does its tasks one at a time; different tabs work side by side (up to 4 at once).
   - The **Agents** list in the panel shows every agent and its tasks, whatever started them: what it's doing now, what's waiting, what's done. Click an agent or a task to go to its tab.
@@ -24,9 +24,10 @@ People and AI bots browse together. A Chrome extension talks to a local bridge, 
   - Workers are Claude processes with no tools of their own, started from an empty folder. Each turn a worker asks the bridge for one browser action, and the bridge runs it only on that worker's tab. There's no MCP, and `ghost_eval` is never available. The panel only talks to the bridge, so Mia can reuse it as is.
   - The model defaults to Sonnet 5.5. Opus 5.5 and Haiku 4.5 are in the picker.
 
+- **Play Automations.** The ▶ button at the top of the side panel lists fixed scripts that Mia Browser runs click by click with no AI: open, click, type, press a key, copy and paste. Mia makes one by doing the job once while every step is recorded ("make a Play Automation that…", or "save that as an automation" after she did something). Each can run when you press Play, every day or on weekdays at a set time, while Chrome is open. Steps that send, post or buy still wait for approval, and a script never types passwords. They're kept in `~/.ghost/automations.json`. What Mia's bots do in the chat, deciding each step as they go, are AI Workflows.
 - **Mac installer.** `packaging/build-pkg.sh` builds `Mia-Browser-Use.pkg`, a double-click installer that brings its own Python, so nothing else is needed first. It then opens a page in Chrome that shows how to add the extension. Once the extension is on the Chrome Web Store, building with `GHOST_WEB_STORE_ID` makes Chrome offer it by itself. Apple Silicon Macs only for now.
 - **Claude account.** Mia answers with the person's own Claude account through Claude Code. The installer installs Claude Code if it's missing, and the first time Mia's panel shows **Sign in to Claude**, which opens the normal Claude sign-in in the browser. Nothing happens in Terminal. This is for the MVP: later, Mia runs on the same core as Mia Multiplayer (Hermes Agent).
-- **Starts by itself.** After the installer, the extension starts Ghost whenever it can't find it, including when Chrome opens. One background program (`mia-browser-use up`) runs the bridge and the room, and restarts either if it stops. A fresh install gets a personal room named after the Mac user, so there's nothing to set up, paste or run. Logs go to `~/.ghost/bridge.log`. `ghost_eval` is never turned on this way.
+- **Starts by itself.** After the installer, the extension starts Ghost whenever it can't find it, including when Chrome opens. One background program (`mia-browser-use up`) runs the bridge and the local relay that carries answers to the page, and restarts either if it stops. There's nothing to set up, paste or run. Logs go to `~/.ghost/bridge.log`. `ghost_eval` is never turned on this way.
 
 ## Principles
 
@@ -55,7 +56,7 @@ A hosted meeting bot that joins as a participant (Recall.ai, for example) also e
 
 1. Transcribe in 5–10 second chunks, skipping silence. Text lags speech by about 2–5 seconds.
 2. Every minute, or at each pause, Sonnet reads the running transcript and pulls out status updates, action items with owners, decisions, and open questions, in the user's Language setting.
-3. They land in the room as live cards that everyone sees, and the transcript and items go into the reel, so the PDF report covers the meeting.
+3. They land on the page as live cards, and the transcript and items go into the reel, so the PDF report covers the meeting.
 4. Only text goes to the model; audio stays on the Mac.
 
 ### What could stop it

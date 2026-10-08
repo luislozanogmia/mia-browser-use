@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +128,7 @@ class HermesPluginTests(unittest.TestCase):
         result = context.tools["ghost_status"]["handler"]({})
         self.assertIn('"connected": true', result)
 
+    @unittest.skipIf(sys.platform == "win32", "the in-app browser (Mac app) talks over a Unix socket")
     def test_self_contained_client_calls_hermes_eval(self):
         module = load_plugin()
         client_module = __import__(module.__name__ + ".client", fromlist=["BrowserClient"])
@@ -165,7 +167,8 @@ class RepositoryBoundaryTests(unittest.TestCase):
         )
         violations = []
         for path in ROOT.rglob("*"):
-            if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+            # Only the project's own files: not a virtualenv, a built installer or downloaded packages.
+            if not path.is_file() or {".git", "__pycache__", "build", "site-packages", "node_modules"} & set(path.parts):
                 continue
             if path.suffix not in {".py", ".js", ".json", ".md", ".html", ".sh", ".yaml"}:
                 continue

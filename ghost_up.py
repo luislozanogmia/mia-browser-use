@@ -1,4 +1,4 @@
-"""Run everything Ghost needs on this Mac, and keep it running: `mia-browser-use up`.
+"""Run everything Mia needs on this computer, and keep it running: `mia-browser-use up`.
 
 Chrome starts this through the native host (native_host.py) whenever the
 extension can't reach the bridge, so nobody has to start anything by hand.
@@ -37,7 +37,7 @@ HEALTHY_SECONDS = 30.0  # a child that ran this long starts over at the shortest
 
 
 def personal_config() -> dict:
-    """Settings for a fresh install: a room of one's own on this Mac."""
+    """Settings for a fresh install: this person's own relay on this Mac."""
     try:
         user = getpass.getuser()
     except Exception:
@@ -68,13 +68,13 @@ def load_or_create_config() -> dict:
 
 
 def local_relay(config: dict) -> int | None:
-    """The relay port when the room lives on this machine (we run its relay)."""
+    """The relay's port. The relay always runs on this machine: there is no remote room."""
     if "room" not in config:
         return None
-    url = urlparse(config.get("room_url") or f"ws://127.0.0.1:{DEFAULT_RELAY_PORT}")
-    if url.scheme != "ws" or url.hostname not in LOCAL_HOSTS:
-        return None
-    return url.port or 80
+    url = urlparse(config.get("room_url") or "")
+    if url.scheme == "ws" and url.hostname in LOCAL_HOSTS and url.port:
+        return url.port
+    return DEFAULT_RELAY_PORT
 
 
 def children(config: dict) -> list[dict]:
@@ -155,25 +155,38 @@ class Supervisor:
             self.stop()
 
 
+def command_line(pid: int) -> str:
+    """The command line of a running process, or "" when there is none."""
+    if native_host.WINDOWS:
+        query = f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}').CommandLine"
+        args = ["powershell", "-NoProfile", "-NonInteractive", "-Command", query]
+    else:
+        args = ["ps", "-o", "command=", "-p", str(pid)]
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=15,
+                              **native_host.detached_popen_kwargs(False)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def up_running() -> bool:
     try:
-        pid = int(UP_PID_PATH.read_text().strip())
-        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+        pid = int(UP_PID_PATH.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return False
-    return "ghost_cli.py up" in command
+    return "ghost_cli.py up" in command_line(pid)
 
 
 def main() -> None:
     GHOST_DIR.mkdir(mode=0o700, exist_ok=True)
-    UP_PID_PATH.write_text(f"{os.getpid()}\n")
+    UP_PID_PATH.write_text(f"{os.getpid()}\n", encoding="utf-8")
     config = load_or_create_config()
     print(f"[up] room {config.get('room', '(none)')} as {config.get('me', '-')}; bridge port {config['port']}", flush=True)
     try:
         Supervisor(config).run()
     finally:
         try:
-            if UP_PID_PATH.read_text().strip() == str(os.getpid()):
+            if UP_PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
                 UP_PID_PATH.unlink()
         except OSError:
             pass

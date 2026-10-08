@@ -99,7 +99,10 @@
     .conv .turn { margin: 0 0 8px; }
     .conv .turn .quote { margin: 0 0 4px; }
     .conv .turn .a-title { font-weight: 600; margin: 0 0 2px; }
-    .conv .turn .a-body { margin: 0; }
+    .conv .turn .a-body { margin: 0 0 6px; }
+    .card ul { margin: 0 0 8px; padding-left: 18px; color: #333; }
+    .card li { margin: 0 0 3px; }
+    .card code { font: 12px/1.4 ui-monospace, Menlo, monospace; background: #f1f3f5; padding: 0 4px; border-radius: 4px; }
     .conv textarea { width: 100%; box-sizing: border-box; font: inherit; border: 1px solid #ccc; border-radius: 6px;
                      padding: 5px 6px; resize: none; }
     .crop-hint { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); pointer-events: none;
@@ -276,7 +279,8 @@
       return elementAnchor(globalThis.__ghostPage.resolve(spec.actor_id, spec.choice), `#${spec.choice}`);
     }
     if (typeof spec.selector === "string" && spec.selector) {
-      const el = document.querySelector(spec.selector);
+      // Inside shadow roots and frames too (LinkedIn's chat window), like the action itself found it.
+      const el = globalThis.__ghostPage?.deepQuery ? globalThis.__ghostPage.deepQuery(spec.selector) : document.querySelector(spec.selector);
       if (!el) throw new Error(`Selector not found: ${spec.selector}`);
       return elementAnchor(el, spec.selector);
     }
@@ -328,9 +332,6 @@
     if (!human) {
       if (globalThis.__ghostMote) marker.style.setProperty("--mote-img", `url("${globalThis.__ghostMote}")`);
       marker.style.setProperty("--hue", `${moteHue(color)}deg`);
-    }
-    if (!human && typeof spec.owner_color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(spec.owner_color)) {
-      marker.style.setProperty("--ring", spec.owner_color);
     }
     const list = layer();
     list.append(ring, marker, label);
@@ -444,10 +445,9 @@
 
   // -- Suggestions: a bot proposes, a human accepts or rejects --------------
 
-  // "luis's Upwork bot" for a bot named after its site, else "Ledger · luis's bot".
-  function botTitle(name, owner) {
-    if (!owner) return name;
-    return /\bbot( \d+)?$/i.test(name) ? `${owner}'s ${name}` : `${name} · ${owner}'s bot`;
+  // The bot's own name: "Upwork bot". One person uses this browser, so no owner is shown.
+  function botTitle(name) {
+    return name;
   }
 
   const cards = new Map(); // suggestion id -> {spec, anchor, node, ring}
@@ -591,9 +591,7 @@
     heading.style.fontWeight = "600";
     parts.push(heading);
     if (spec.body) {
-      const body = document.createElement("p");
-      body.textContent = String(spec.body).slice(0, 600);
-      parts.push(body);
+      parts.push(...markdownBlocks(String(spec.body).slice(0, 2000), ""));
     }
     if (kind === "edit") {
       // Only a proposed change needs a decision.
@@ -629,36 +627,44 @@
   // the address without loading a new page. A question and its answer belong
   // to the address they were asked on, and come back with it (Back).
 
-  // Match the room's URL shape without exposing credentials in query parameters.
-  // Keep this list in sync with ROOM_QUERY_KEYS in ghost_room.py.
-  const ROOM_QUERY_KEYS = new Set([
-    "q", "query", "search", "term", "page", "start", "offset", "sort",
-    "filter", "view", "tab", "gid", "lang", "language",
-  ]);
-  const TOKENISH_VALUE = /^(?:[A-Za-z0-9_-]{32,}|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;
+  const here = () => location.href.split("#")[0];
 
-  function roomHref(raw) {
-    try {
-      const url = new URL(raw);
-      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
-      const key = `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "") || "/"}`;
-      const safe = new URLSearchParams();
-      for (const [name, value] of url.searchParams) {
-        if (ROOM_QUERY_KEYS.has(name.toLowerCase()) && value.length <= 128 && !TOKENISH_VALUE.test(value)) {
-          safe.append(name, value);
-        }
-      }
-      const query = safe.toString();
-      return query ? `${key}?${query}` : key;
-    } catch {
-      return "";
+  // A bot's answer is short markdown: paragraphs, "- " bullets, **bold** and `code`. Built as nodes, never as HTML.
+  function inlineMarkdown(text, into) {
+    const re = /\*\*([^*]+)\*\*|`([^`]+)`/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) into.append(text.slice(last, m.index));
+      into.append(Object.assign(document.createElement(m[1] ? "strong" : "code"), { textContent: m[1] || m[2] }));
+      last = re.lastIndex;
     }
+    if (last < text.length) into.append(text.slice(last));
   }
 
-  const here = () => roomHref(location.href);
+  function markdownBlocks(text, className) {
+    const blocks = [];
+    let list = null;
+    for (const raw of String(text).split("\n")) {
+      const line = raw.trim();
+      if (!line) { list = null; continue; }
+      const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+      if (bullet) {
+        if (!list) blocks.push(list = Object.assign(document.createElement("ul"), { className }));
+        const item = document.createElement("li");
+        inlineMarkdown(bullet[1], item);
+        list.append(item);
+      } else {
+        list = null;
+        const p = Object.assign(document.createElement("p"), { className });
+        inlineMarkdown(line.replace(/^#{1,6}\s+/, ""), p);
+        blocks.push(p);
+      }
+    }
+    return blocks;
+  }
 
   function showIfHere(card) {
-    const href = typeof card.spec.href === "string" ? roomHref(card.spec.href) : "";
+    const href = typeof card.spec.href === "string" ? card.spec.href.split("#")[0] : "";
     card.away = Boolean(href) && href !== here();
     card.node.style.display = card.away ? "none" : "";
     if (card.away) card.ring.style.display = "none";
@@ -716,7 +722,7 @@
       turn.by = name;
     } else {
       turn.q ||= String(spec.question || "").slice(0, 600);
-      turn.a = { title: String(spec.title || "").slice(0, 120), body: String(spec.body || "").slice(0, 600),
+      turn.a = { title: String(spec.title || "").slice(0, 120), body: String(spec.body || "").slice(0, 2000),
                  by: botTitle(name, actor.owner) };
     }
     renderConversation(card);
@@ -760,7 +766,7 @@
       box.append(Object.assign(document.createElement("p"), { className: "quote", textContent: `${turn.by ? `${turn.by}: ` : ""}“${turn.q}”` }));
       if (turn.a) {
         box.append(Object.assign(document.createElement("p"), { className: "a-title", textContent: turn.a.title }));
-        if (turn.a.body) box.append(Object.assign(document.createElement("p"), { className: "a-body", textContent: turn.a.body }));
+        if (turn.a.body) box.append(...markdownBlocks(turn.a.body, "a-body"));
       } else {
         const waiting = Object.assign(document.createElement("p"), { className: "waiting",
           textContent: turn.stopping ? "Stopping…" : "Waiting for a bot to answer…" });

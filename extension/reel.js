@@ -103,7 +103,7 @@ async function render() {
   const added = entries.length - shown;
   shown = entries.length;
   count.textContent = `${shown} moment${shown === 1 ? "" : "s"}`;
-  if (!shown) reel.replaceChildren(el("p", { className: "empty", textContent: "Nothing yet. Turn on Reel mode in the Ghost menu and browse a shared page." }));
+  if (!shown) reel.replaceChildren(el("p", { className: "empty", textContent: "Nothing yet. Turn on Reel mode in the Mia Browser menu and browse a shared page." }));
   // New moments load below; follow them when already at the end.
   if (added && (nearBottom || added === shown) && !document.body.classList.contains("booking")) scrollTo({ top: document.body.scrollHeight, behavior: added === shown ? "auto" : "smooth" });
 }

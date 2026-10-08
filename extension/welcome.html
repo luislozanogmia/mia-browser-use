@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome to Mia</title>
+<link rel="icon" href="icons/mia-32.png">
+<style>
+  :root { --bg:#FBFAF7; --surface:#FFFFFF; --text:#1F1E1B; --muted:#6B6960; --border:#E6E3DB; --amber:#EF9F27; --amber-ink:#412402; --ok:#085041; --ok-tint:#E1F5EE; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1B1A18; --surface:#24231F; --text:#EEEBE3; --muted:#ABA79B; --border:#36342F; --ok:#9FE1C8; --ok-tint:#12352B; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; justify-content:center; padding:48px 20px; background:var(--bg); color:var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { width:100%; max-width:560px; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:28px; }
+  header img { width:48px; height:48px; }
+  h1 { margin:0; font-size:24px; }
+  header p { margin:2px 0 0; color:var(--muted); }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:22px 24px; margin-bottom:16px; }
+  .card h2 { margin:0 0 8px; font-size:17px; }
+  .card p { margin:0 0 12px; color:var(--muted); }
+  .btn { display:inline-block; padding:11px 20px; border-radius:10px; background:var(--amber); color:var(--amber-ink); font-weight:600; text-decoration:none; }
+  ol { margin:12px 0 0; padding-left:20px; color:var(--muted); }
+  li { margin:4px 0; }
+  details { color:var(--muted); font-size:14px; } summary { cursor:pointer; color:var(--text); }
+  .status { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--amber); flex:none; }
+  .ready { background:var(--ok-tint); border-color:transparent; } .ready .dot { background:var(--ok); } .ready h2, .ready p { color:var(--ok); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icons/mia-128.png" alt="">
+    <div><h1>Mia is in Chrome</h1><p>Your browser assistant: she reads, compares and acts on your tabs with you.</p></div>
+  </header>
+
+  <section class="card" id="setup">
+    <h2 id="setupTitle">One more step on this computer</h2>
+    <p>Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and Mia connects by herself.</p>
+    <a class="btn" id="download" href="#" target="_blank" rel="noopener">Download the Mia installer</a>
+    <ol>
+      <li>Open the download (bottom of this window, or your Downloads folder)</li>
+      <li>Click <b>Install</b> (and enter your password if your computer asks)</li>
+      <li>Come back to this tab. It turns green when Mia is ready</li>
+    </ol>
+  </section>
+
+  <section class="card status" id="status">
+    <span class="dot"></span>
+    <div><h2 id="statusTitle">Waiting for the installer…</h2><p id="statusText">This page checks every few seconds. Nothing to click.</p></div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>What the installer adds, and how to remove it</summary>
+      <p style="margin-top:10px">It puts the Mia helper on your computer (<b>/Library/Application Support/Ghost</b> on a Mac, <b>AppData\Local\Mia</b> on Windows, <b>/opt/mia-browser-use</b> on Linux): its own copy of Python and Mia's programs, plus the small program Chrome uses to start them. If you don't have Claude Code, it installs it with Anthropic's official installer; Mia answers with your own Claude account, under Anthropic's terms. Nothing runs until Chrome asks for it. Remove it with <b>uninstall.sh</b> in that folder on a Mac, from Installed apps on Windows, or with your package manager on Linux.</p>
+    </details>
+  </section>
+</main>
+<script src="welcome.js"></script>
+</body>
+</html>

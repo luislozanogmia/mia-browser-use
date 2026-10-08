@@ -3,7 +3,8 @@
  *
  * Each actor (bot or human) gets its own numbered element list per page, so
  * one bot's read never renumbers another bot's elements. Edits are
- * focus-free: they never move the human's keyboard focus or text cursor.
+ * focus-free: they never keep the human's keyboard focus or text cursor (a rich editor
+ * gets focus only while text goes in, then it goes back).
  *
  * The Chrome extension injects this file into its isolated world, and the Mia
  * in-app browser can run it in the page. It keeps no state outside the page.
@@ -26,8 +27,63 @@
     return actor;
   }
 
+  // Sites like LinkedIn draw parts of the page (its message window) inside shadow roots, which
+  // document.querySelector and childNodes don't reach. The extension can open closed ones too.
+  function shadowOf(node) {
+    try {
+      return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(node) || node.shadowRoot || null;
+    } catch {
+      return node.shadowRoot || null;
+    }
+  }
+
+  /** A frame's page when it's from the same site (LinkedIn draws its messaging in one), else null. */
+  function frameDoc(node) {
+    if (node.tagName !== "IFRAME" && node.tagName !== "FRAME") return null;
+    try {
+      return node.contentDocument?.documentElement ? node.contentDocument : null;
+    } catch {
+      return null;  // another site's frame: not readable, and not ours to read
+    }
+  }
+
+  /** querySelector that also looks inside shadow roots and same-site frames. */
+  function deepQuery(selector, root = document) {
+    const found = root.querySelector(selector);
+    if (found) return found;
+    for (const host of root.querySelectorAll("*")) {
+      const inside = shadowOf(host) || frameDoc(host);
+      const inner = inside && deepQuery(selector, inside);
+      if (inner) return inner;
+    }
+    return null;
+  }
+
+  function styleOf(node) {
+    return (node.ownerDocument?.defaultView || window).getComputedStyle(node);
+  }
+
+  /** What a node shows, in order: its shadow tree (with slotted content), a frame's page, or its own children. */
+  function renderedChildren(node) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const shadow = shadowOf(node);
+      if (shadow) return shadow.childNodes;
+      const doc = frameDoc(node);
+      if (doc) {
+        // A frame kept behind the page (LinkedIn preloads a hidden copy of itself) isn't shown: skip it.
+        const r = node.getBoundingClientRect(), z = parseInt(styleOf(node).zIndex, 10);
+        return doc.body && r.width > 1 && r.height > 1 && !(z < 0) ? [doc.body] : [];
+      }
+      if (node.tagName === "SLOT") {
+        const assigned = node.assignedNodes({ flatten: true });
+        if (assigned.length) return assigned;
+      }
+    }
+    return node.childNodes;
+  }
+
   function isVisible(node) {
-    const style = getComputedStyle(node);
+    const style = styleOf(node);
     return style.display !== "none" && style.visibility !== "hidden";
   }
 
@@ -54,24 +110,93 @@
     const type = node.getAttribute("type") || "";
     // Current form values can hold credentials; list the control, never its value.
     const value = (tag === "input" || tag === "textarea") && node.value ? "[REDACTED]" : "";
-    if (tag === "a") return `[${n}] link: ${label}` + (href ? ` (${href.slice(0, 80)})` : "");
+    if (tag === "a") return `[${n}] link: ${label}` + (href ? ` (${href.slice(0, 200)})` : "");
     if (tag === "input") return `[${n}] input(${type}): ${value || label}`;
     if (tag === "select") return `[${n}] select: ${label}`;
     if (tag === "textarea") return `[${n}] textarea: ${value || label}`;
     return `[${n}] ${tag}: ${label}`;
   }
 
+  function parentOf(node) {
+    if (node.parentElement) return node.parentElement;
+    const root = node.getRootNode();
+    if (root.host) return root.host;  // out of a shadow root
+    return root.defaultView?.frameElement || null;  // out of a frame
+  }
+
+  /** The element on top at a point, inside shadow roots too. */
+  function topAt(x, y) {
+    let el = document.elementFromPoint(x, y);
+    for (let depth = 0; el && depth < 10; depth++) {
+      let inner = shadowOf(el)?.elementFromPoint(x, y);
+      const doc = !inner && frameDoc(el);
+      if (doc) {  // into the frame, in its own coordinates
+        const r = el.getBoundingClientRect();
+        x -= r.left; y -= r.top;
+        inner = doc.elementFromPoint(x, y);
+      }
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  }
+
+  /** What floats on top of the page (a chat window, a dialog, a pop-up), found by looking at what's on
+   * top across the screen. Sites often add these at the end of the page, past where a read stops. */
+  function layersOnTop() {
+    const found = new Set();
+    const blocks = new Map();  // the page's top-level block under each point -> how often
+    const floating = new Set();  // blocks where what's under the point floats (fixed or absolute)
+    const tall = node => node.getBoundingClientRect().height >= 120;  // not a bar (a top menu, a minimized chat)
+    const w = innerWidth, h = innerHeight;
+    for (let i = 1; i < 12; i++) {
+      for (let j = 1; j < 8; j++) {
+        let fixed = null, lastTall = null, block = null, floats = false;
+        for (let node = topAt((w * i) / 12, (h * j) / 8); node && node !== document.body && node !== document.documentElement;
+             node = parentOf(node)) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (tall(node)) lastTall = node;
+          const position = styleOf(node).position;
+          if (position === "fixed" || position === "absolute") floats = true;
+          if (position === "fixed" || ["dialog", "alertdialog"].includes(node.getAttribute("role"))) {
+            // The outermost one is the whole window; a short fixed holder stands for the tall box inside it.
+            fixed = tall(node) ? node : lastTall || fixed;
+          }
+          if (node.parentElement === document.body) block = node;
+        }
+        if (fixed) found.add(fixed);
+        if (block) blocks.set(block, (blocks.get(block) || 0) + 1);
+        if (block && floats) floating.add(block);
+      }
+    }
+    // Windows, chats and dialogs are usually their own block next to the page's main one (LinkedIn's
+    // message window is): another block on screen whose part there floats is on top of the page.
+    // (A side menu that's just part of the layout doesn't float.)
+    const main = [...blocks].sort((a, b) => b[1] - a[1])[0]?.[0];
+    for (const block of floating) {
+      if (block !== main && tall(block)) found.add(block);
+    }
+    // A layer inside another is read with it.
+    return [...found].filter(a => a !== main && ![...found].some(b => b !== a && deepContains(b, a)));
+  }
+
+  function deepContains(outer, node) {
+    for (let n = node; n; n = parentOf(n)) if (n === outer) return true;
+    return false;
+  }
+
   /** Walk the page, number interactive elements for this actor, return text. */
   function enumerate(actor, maxChars, selector) {
     checkActor(actor);
-    const rootEl = selector ? document.querySelector(selector) : document.body;
+    const rootEl = selector ? deepQuery(selector) : document.body;
     if (!rootEl) fail("NOT_FOUND", `Selector "${selector}" not found`);
     const items = [];
     const elements = [];
     let chars = 0;
+    let skip = new Set();  // layers already read
 
     function walk(node) {
-      if (chars >= maxChars) return;
+      if (chars >= maxChars || skip.has(node)) return;
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent.trim();
         if (text) { items.push(text); chars += text.length; }
@@ -92,13 +217,25 @@
         chars += line.length;
         if (!container) return;
       }
-      for (const child of node.childNodes) {
+      for (const child of renderedChildren(node)) {
         if (chars >= maxChars) break;
         walk(child);
       }
     }
 
-    walk(rootEl);
+    if (selector) {
+      walk(rootEl);
+    } else {
+      // What's on top first: it's what the person is looking at, and it may be past where the read stops.
+      const layers = layersOnTop();
+      if (layers.length) {
+        items.push("On top of the page (a window or dialog):");
+        for (const layer of layers) walk(layer);
+        items.push("The page under it:");
+        skip = new Set(layers);
+      }
+      walk(rootEl);
+    }
     const snapshot = `${actor}-${++snapshotCounter}`;
     lists.set(actor, { snapshot, elements });
     return { text: items.join("\n"), count: elements.filter(Boolean).length, snapshot };
@@ -107,7 +244,7 @@
   /** Find the element an actor means: its own number, or a selector. */
   function resolve(actor, choice, selector) {
     if (typeof selector === "string" && selector) {
-      const el = document.querySelector(selector);
+      const el = deepQuery(selector);
       if (!el) fail("NOT_FOUND", `Selector not found: ${selector}`);
       return el;
     }
@@ -124,10 +261,12 @@
 
   /** A CSS path that another browser showing the same page can resolve. */
   function cssPath(el) {
-    if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) return `#${CSS.escape(el.id)}`;
+    // Inside a shadow root the path starts at that root; deepQuery finds it there again.
+    const scope = el.getRootNode();
+    if (el.id && scope.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) return `#${CSS.escape(el.id)}`;
     const parts = [];
     for (let node = el; node && node.nodeType === Node.ELEMENT_NODE && node !== document.documentElement; node = node.parentElement) {
-      if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) {
+      if (node.id && scope.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) {
         parts.unshift(`#${CSS.escape(node.id)}`);
         break;
       }
@@ -154,11 +293,25 @@
 
   function click(actor, choice, selector) {
     const el = resolve(actor, choice, selector);
-    // el.click() runs the element's handlers without moving keyboard focus.
-    for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup"]) {
-      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-    }
-    el.click();
+    // A click the way a mouse makes one: at the element's middle, with pointer events. Sites like
+    // LinkedIn only handle clicks that look like that (a bare el.click() on its Message button follows
+    // the link to the Messaging page instead of opening the chat on the profile). No focus moves.
+    const win = el.ownerDocument?.defaultView || window;
+    const r = el.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, composed: true, view: win, button: 0,
+                 clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    const pointer = { ...at, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    el.dispatchEvent(new win.PointerEvent("pointerover", pointer));
+    el.dispatchEvent(new win.MouseEvent("mouseover", at));
+    el.dispatchEvent(new win.PointerEvent("pointermove", pointer));
+    el.dispatchEvent(new win.MouseEvent("mousemove", at));
+    el.dispatchEvent(new win.PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+    el.dispatchEvent(new win.MouseEvent("mousedown", { ...at, buttons: 1, detail: 1 }));
+    el.dispatchEvent(new win.PointerEvent("pointerup", pointer));
+    el.dispatchEvent(new win.MouseEvent("mouseup", { ...at, detail: 1 }));
+    // The click itself runs the element's default too (follows a link, ticks a box) unless the site
+    // handles it, like el.click() did.
+    el.dispatchEvent(new win.MouseEvent("click", { ...at, detail: 1 }));
     return { clicked: true, tag: el.tagName.toLowerCase(), text: (el.textContent || "").trim().slice(0, 100), anchor: anchorOf(el) };
   }
 
@@ -166,15 +319,87 @@
     const tag = el.tagName.toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select") {
       // The native setter keeps frameworks like React in sync, and no focus is needed.
-      const proto = tag === "input" ? HTMLInputElement.prototype : tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
+      const win = el.ownerDocument?.defaultView || window;  // a frame's element uses its frame's setters
+      const proto = tag === "input" ? win.HTMLInputElement.prototype : tag === "textarea" ? win.HTMLTextAreaElement.prototype : win.HTMLSelectElement.prototype;
       Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
     } else if (el.isContentEditable) {
-      el.textContent = value;
+      typeIntoEditor(el, value);
+      return;  // the editor sent its own input events
     } else {
       fail("NOT_EDITABLE", `<${tag}> is not an input, textarea, select or editable element`);
     }
     el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText" }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  /** Rich editors (LinkedIn's message box, Gmail, Slack) keep their own model of the text and only see
+   * what comes through the browser's text input: replacing the element's text left LinkedIn's
+   * placeholder drawn over it and Send off. Insert it the way typing or pasting does, then hand the
+   * keyboard back to wherever it was. */
+  function typeIntoEditor(el, value) {
+    const doc = el.ownerDocument, win = doc.defaultView;
+    const before = doc.activeElement;
+    el.focus({ preventScroll: true });
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    const selection = win.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    // Empty it first, the way the editor itself deletes (a selection inside a chat window's shadow
+    // root may cover only part of an old draft); if that leaves text, clear it by hand.
+    doc.execCommand("selectAll");
+    doc.execCommand("delete");
+    if (el.textContent.trim()) {
+      el.replaceChildren(doc.createElement("p"));
+      el.firstChild.append(doc.createElement("br"));
+      el.dispatchEvent(new win.InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    }
+    selection.removeAllRanges();
+    range.selectNodeContents(el.firstChild || el);
+    range.collapse(true);
+    selection.addRange(range);
+    const lines = value.split("\n");
+    // Exactly the value (ignoring spacing) with its line breaks: nothing of an old draft left around it.
+    const bare = text => text.replace(/\s+/g, "");
+    const exact = () => bare(el.textContent) === bare(value);
+    const kept = () => exact() && (el.innerText.match(/\n/g) || []).length >= lines.length - 1;
+    let typed = false;
+    if (lines.length > 1) {
+      // Several lines: paste them the way the person would, so editors (LinkedIn's) keep every line
+      // break and blank line. Editors that ignore a paste get each line typed with Enter between.
+      const data = new win.DataTransfer();
+      data.setData("text/plain", value);
+      el.dispatchEvent(new win.ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      typed = kept();
+      if (!typed) {
+        selection.removeAllRanges();
+        range.selectNodeContents(el);
+        selection.addRange(range);
+        doc.execCommand("delete");
+        lines.forEach((line, i) => {
+          if (i) doc.execCommand("insertParagraph");
+          if (line) doc.execCommand("insertText", false, line);
+        });
+        typed = kept();
+      }
+    } else {
+      typed = doc.execCommand("insertText", false, value);
+    }
+    if (!typed || !exact()) {
+      // No text input here: one paragraph per line, as editors keep them.
+      el.replaceChildren(...value.split("\n").map(line => {
+        const p = doc.createElement("p");
+        if (line) p.textContent = line; else p.append(doc.createElement("br"));
+        return p;
+      }));
+      el.dispatchEvent(new win.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    }
+    selection.removeAllRanges();
+    if (before && before !== el && before !== doc.body && typeof before.focus === "function") {
+      before.focus({ preventScroll: true });
+    } else {
+      el.blur();
+    }
   }
 
   function fill(actor, choice, selector, value) {
@@ -186,17 +411,11 @@
   /** Append text to one element without focusing it. */
   function typeInto(actor, choice, selector, text) {
     const el = resolve(actor, choice, selector);
-    const current = el.isContentEditable ? el.textContent : (el.value ?? "");
+    // innerText keeps the line breaks the editor already has (textContent runs paragraphs together).
+    const current = el.isContentEditable ? el.innerText.replace(/\n$/, "") : (el.value ?? "");
     setValue(el, current + String(text));
     return { typed: true, characters: String(text).length, tag: el.tagName.toLowerCase(), anchor: anchorOf(el) };
   }
 
-  /** Where the human is working in this page, for their presence. */
-  function humanFocus() {
-    const el = document.activeElement;
-    if (!el || el === document.body || el === document.documentElement) return null;
-    return anchorOf(el);
-  }
-
-  globalThis.__ghostPage = { enumerate, resolve, anchorOf, cssPath, click, fill, typeInto, humanFocus, build: globalThis.__ghostBuild };
+  globalThis.__ghostPage = { enumerate, resolve, deepQuery, anchorOf, cssPath, click, fill, typeInto, build: globalThis.__ghostBuild };
 })();

@@ -69,7 +69,7 @@ class BrowserClient:
         chrome = BridgeTransport()
         status = chrome.status()
         if not status.get("connected"):
-            raise RuntimeError(status.get("error", "Chrome extension bridge is unavailable"))
+            raise RuntimeError(status.get("error", "Mia is running, but the Chrome extension isn't connected. Open Chrome with the Mia extension."))
         self.backend = "chrome"
         self.transport = chrome
         return status
@@ -118,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("--args", type=_json_object, default={})
     call.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
     call.add_argument("--allow-eval", action="store_true", help="Explicitly allow ghost_eval for this call")
-    call.add_argument("--actor", default=os.getenv("GHOST_ACTOR_ID"), help="Act as this bot or human (multiplayer); calls then need tab_id and never change the human's view")
+    call.add_argument("--actor", default=os.getenv("GHOST_ACTOR_ID"), help="Act as this bot; calls then need tab_id and never change the person's view")
 
     context = sub.add_parser("context", help="Print a note about the page the user has open, for prompt hooks")
     context.add_argument("--backend", choices=("auto", "chrome", "hermes"), default=os.getenv("GHOST_BROWSER_BACKEND", "auto"))
@@ -128,37 +128,23 @@ def build_parser() -> argparse.ArgumentParser:
     token.add_argument("--path-only", action="store_true", help="Print only the token file path")
 
     sub.add_parser("pair-chrome", help="Let the Chrome extension pair itself (installs a native messaging host)")
-    sub.add_parser("up", help="Run and watch everything Ghost needs (bridge and local room); Chrome starts this by itself")
+    sub.add_parser("up", help="Run and watch everything Mia Browser needs (bridge and local relay); Chrome starts this by itself")
 
     serve = sub.add_parser("serve", help="Run the Chrome extension bridge")
     serve.add_argument("--port", type=int, default=9377)
     serve.add_argument("--allow-eval", action="store_true", help="Explicitly enable ghost_eval in the bridge")
-    serve.add_argument("--room", help="Join this multiplayer room (key from GHOST_ROOM_KEY or ~/.ghost/rooms/<room>.key)")
-    serve.add_argument("--room-url", default=os.getenv("GHOST_ROOM_URL", "ws://127.0.0.1:9390"), help="Room relay URL (wss:// unless on this machine)")
-    serve.add_argument("--me", default=os.getenv("GHOST_ME"), help="Your id in the room, e.g. luis")
-    serve.add_argument("--name", help="Your display name in the room")
-    serve.add_argument("--color", help="Your player color, e.g. #3b82f6")
+    serve.add_argument("--room", help="Name of the local relay this bridge uses (key in ~/.ghost/rooms/<room>.key)")
+    serve.add_argument("--room-url", default=os.getenv("GHOST_ROOM_URL", "ws://127.0.0.1:9390"), help="The local relay's address (ws://127.0.0.1 only)")
+    serve.add_argument("--me", default=os.getenv("GHOST_ME"), help="This person's id, e.g. luis")
+    serve.add_argument("--name", help=argparse.SUPPRESS)
+    serve.add_argument("--color", help=argparse.SUPPRESS)
 
-    room = sub.add_parser("room", help="Multiplayer rooms")
+    room = sub.add_parser("room", help="The local relay that carries questions and answers to the page")
     room_sub = room.add_subparsers(dest="room_command", required=True)
-    host = room_sub.add_parser("serve", help="Run a room relay on this machine")
+    host = room_sub.add_parser("serve", help="Run the relay on this machine (`up` does this by itself)")
     host.add_argument("--room", required=True)
-    host.add_argument("--host", default="127.0.0.1", help="Listen address (keep 127.0.0.1 unless behind TLS)")
+    host.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
     host.add_argument("--port", type=int, default=9390)
-    for name, help_text in (("status", "Show the room: members, shared pages, presence, suggestions"),):
-        room_sub.add_parser(name, help=help_text)
-    share = room_sub.add_parser("share", help="Share a page with the room")
-    share.add_argument("url")
-    unshare = room_sub.add_parser("unshare", help="Stop sharing a page")
-    unshare.add_argument("url")
-    answer = room_sub.add_parser("answer", help="Run a bot that answers questions people ask about selected text")
-    answer.add_argument("--as", dest="actor", default="claude", help="The bot's id in the room")
-    answer.add_argument("--model", default=os.getenv("GHOST_ASK_MODEL", "sonnet"), help="Model for the answers (claude --model)")
-    answer.add_argument("--claude", default=os.getenv("GHOST_CLAUDE_BIN", "claude"), help="Path to the claude CLI")
-    answer.add_argument("--color", default="#d97706")
-    resolve = room_sub.add_parser("resolve", help="Accept or reject a suggestion")
-    resolve.add_argument("id")
-    resolve.add_argument("decision", choices=("accept", "reject"))
     return parser
 
 
@@ -182,19 +168,7 @@ def run_room_command(args) -> Any:
 
         asyncio.run(run())
         return None
-    if args.room_command == "answer":
-        from ask_bot import AskBot, claude_answer, claude_report
-
-        validate_actor(args.actor)
-        bot = AskBot(args.actor, claude_answer(args.model, args.claude, room_only=True), color=args.color,
-                     report=claude_report(args.model, args.claude),
-                     label=f"{args.actor.capitalize()} · {args.model}")
-        bot.run_forever()
-        return None
-    bridge = BridgeTransport()
-    command = {"status": "ghost_room", "share": "room_share", "unshare": "room_unshare", "resolve": "room_resolve"}[args.room_command]
-    params = {k: getattr(args, k) for k in ("url", "id", "decision") if hasattr(args, k)}
-    return bridge.call(command, params)
+    raise SystemExit(f"Unknown room command {args.room_command}")
 
 
 def page_context_note(client: BrowserClient) -> str:

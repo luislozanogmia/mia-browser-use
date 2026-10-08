@@ -50,7 +50,7 @@ def _validate_private_parent(path: Path) -> None:
         raise BridgeAuthError(f"Bridge token parent must be a directory: {path.parent}")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise BridgeAuthError(f"Bridge token directory is not owned by the current user: {path.parent}")
-    if info.st_mode & 0o022:
+    if os.name != "nt" and info.st_mode & 0o022:  # Windows: NTFS ACLs, no POSIX mode bits
         raise BridgeAuthError(f"Bridge token directory must not be group/world writable: {path.parent}")
 
 
@@ -71,7 +71,7 @@ def _read_private_file(path: Path) -> str:
             raise BridgeAuthError(f"Bridge token path must be a regular file: {path}")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise BridgeAuthError(f"Bridge token file is not owned by the current user: {path}")
-        if info.st_mode & 0o077:
+        if os.name != "nt" and info.st_mode & 0o077:
             raise BridgeAuthError(f"Bridge token file permissions must be 0600: {path}")
         with os.fdopen(fd, "r", encoding="utf-8") as handle:
             fd = -1
@@ -186,7 +186,7 @@ def load_bridge_token(*, create: bool = False) -> str:
             raise
     if not create:
         raise BridgeAuthError(
-            f"Bridge token not found at {path}. Start bridge_server.py once to create it."
+            f"Bridge token not found at {path}. Open Chrome with the Mia extension, or run `mia-browser-use up`, to create it."
         )
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

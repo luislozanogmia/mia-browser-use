@@ -19,10 +19,13 @@ tests for changes to either transport.
 
 Nothing is started by hand. The extension starts `mia-browser-use up` (ghost_up.py)
 through the native messaging host (native_host.py) whenever it can't reach the
-bridge; `up` runs the bridge and the local room relay, restarts
-any that stop, and on first run creates a personal room. Its log is
-`~/.ghost/bridge.log`. To change the room, edit `~/.ghost/bridge.json` or run
-`mia-browser-use serve --room ...` once (it saves its settings), then stop `up`.
+bridge; `up` runs the bridge and the local relay (ghost_room.py, the internal
+path that carries questions and answers to the page) and restarts any that
+stop. Its log is `~/.ghost/bridge.log`. Mia Browser is for one person on one
+computer: the relay only listens on 127.0.0.1, there is no remote room, no
+sharing of tabs with other people, and no presence of other people's cursors.
+Every open http(s) tab is shared with the relay by the extension for as long
+as it's open (one bot per tab); keep it that way.
 
 The token is created on first use and handed to the extension by the native
 host. Direct HTTP callers must sign requests and verify response signatures

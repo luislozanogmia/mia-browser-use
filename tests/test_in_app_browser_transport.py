@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import socket
 import unittest
 from pathlib import Path
 
@@ -56,6 +57,7 @@ class TestInAppBrowserTransportConnection(unittest.TestCase):
         self.assertFalse(status.get("connected", True))
 
 
+@unittest.skipIf(sys.platform == "win32", "the in-app browser (Mac app) talks over a Unix socket")
 class TestInAppBrowserTransportWithMock(unittest.TestCase):
     """Test commands against the mock In-App Browser server."""
 
@@ -273,6 +275,7 @@ class TestInAppBrowserTransportWithMock(unittest.TestCase):
         self.assertEqual(req.get("token"), self._token)
 
 
+@unittest.skipIf(sys.platform == "win32", "the in-app browser (Mac app) talks over a Unix socket")
 class TestInAppBrowserTransportBounds(unittest.TestCase):
     """Test response bounding and safety."""
 

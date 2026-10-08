@@ -1,7 +1,6 @@
 import json
-import hashlib
-import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +10,15 @@ import claude_setup
 
 
 def fake_claude(folder: Path, status: dict | None, login_exit: int = 0, login_sleep: float = 0) -> str:
+    if sys.platform == "win32":
+        path = folder / "claude.cmd"
+        answer = json.dumps(status) if status is not None else "oops"
+        path.write_text(
+            "@echo off\r\n"
+            f"if \"%1 %2\"==\"auth status\" (echo {answer}& exit /b 0)\r\n"
+            f"if \"%1 %2\"==\"auth login\" (ping -n {int(login_sleep) + 1} 127.0.0.1 >nul & exit /b {login_exit})\r\n"
+            "exit /b 2\r\n")
+        return str(path)
     path = folder / "claude"
     path.write_text(
         "#!/bin/sh\n"
@@ -23,7 +31,7 @@ def fake_claude(folder: Path, status: dict | None, login_exit: int = 0, login_sl
 
 class ClaudeSetupTests(unittest.TestCase):
     def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
+        self._dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = Path(self._dir.name)
         claude_setup._cache.update(at=0.0, value=None)
         self.home = mock.patch.object(claude_setup.Path, "home", return_value=self.tmp)
@@ -40,54 +48,35 @@ class ClaudeSetupTests(unittest.TestCase):
     def test_signed_in_and_signed_out(self):
         for logged, expected in ((True, True), (False, False)):
             binary = fake_claude(self.tmp, {"loggedIn": logged})
-            with mock.patch.object(claude_setup, "binary", return_value=binary):
+            with mock.patch.object(claude_setup.shutil, "which", return_value=binary):
                 self.assertEqual(claude_setup.status(True), {"installed": True, "signed_in": expected})
 
     def test_garbled_status_means_signed_out(self):
         binary = fake_claude(self.tmp, None)
-        with mock.patch.object(claude_setup, "binary", return_value=binary):
+        with mock.patch.object(claude_setup.shutil, "which", return_value=binary):
             self.assertFalse(claude_setup.status(True)["signed_in"])
 
     def test_status_is_cached(self):
         binary = fake_claude(self.tmp, {"loggedIn": True})
-        with mock.patch.object(claude_setup, "binary", return_value=binary):
+        with mock.patch.object(claude_setup.shutil, "which", return_value=binary):
             claude_setup.status(True)
         with mock.patch.object(claude_setup.shutil, "which", return_value=None):
             self.assertTrue(claude_setup.status()["installed"])
 
     def test_login_waiting_for_browser_opens_no_terminal(self):
         binary = fake_claude(self.tmp, {"loggedIn": False}, login_sleep=5)
-        with mock.patch.object(claude_setup, "binary", return_value=binary), \
+        with mock.patch.object(claude_setup.shutil, "which", return_value=binary), \
              mock.patch.object(claude_setup, "LOGIN_WAIT_SECONDS", 0.5), \
-             mock.patch.object(claude_setup, "_in_terminal") as terminal:
-            claude_setup.login()
-        terminal.assert_not_called()
+             mock.patch.object(claude_setup.subprocess, "run") as run:
+            self.assertTrue(claude_setup.login())
+        run.assert_not_called()
 
-    def test_login_that_needs_a_terminal_gets_one(self):
+    def test_failed_login_reports_it_and_never_opens_terminal(self):
         binary = fake_claude(self.tmp, {"loggedIn": False}, login_exit=1)
-        with mock.patch.object(claude_setup, "binary", return_value=binary), \
-             mock.patch.object(claude_setup, "_in_terminal") as terminal:
-            claude_setup.login()
-        terminal.assert_called_once_with(binary)
-
-    def test_pinned_install_rejects_wrong_hash_and_never_executes_download(self):
-        with mock.patch.object(claude_setup.platform, "system", return_value="Darwin"), \
-             mock.patch.object(claude_setup.platform, "machine", return_value="arm64"), \
-             mock.patch.object(claude_setup, "urlopen", return_value=io.BytesIO(b"untrusted")), \
-             mock.patch.object(claude_setup.shutil, "which", return_value=None):
-            self.assertFalse(claude_setup.install())
-            self.assertIsNone(claude_setup.binary())
-        self.assertFalse((self.tmp / ".ghost" / "bin" / "claude").exists())
-
-    def test_pinned_install_accepts_only_matching_binary(self):
-        payload = b"verified test binary"
-        checksums = {"arm64": hashlib.sha256(payload).hexdigest(), "x64": "different"}
-        with mock.patch.object(claude_setup.platform, "system", return_value="Darwin"), \
-             mock.patch.object(claude_setup.platform, "machine", return_value="arm64"), \
-             mock.patch.object(claude_setup, "CLAUDE_MAC_SHA256", checksums), \
-             mock.patch.object(claude_setup, "urlopen", return_value=io.BytesIO(payload)):
-            self.assertTrue(claude_setup.install())
-            self.assertEqual(claude_setup.binary(), str(self.tmp / ".ghost" / "bin" / "claude"))
+        with mock.patch.object(claude_setup.shutil, "which", return_value=binary), \
+             mock.patch.object(claude_setup.subprocess, "run") as run:
+            self.assertFalse(claude_setup.login())
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -390,7 +390,7 @@ class AskBot:
         heading = next((line[2:].strip() for line in markdown.splitlines() if line.startswith("# ")), "Session report")
         self.report_dir.mkdir(parents=True, exist_ok=True)
         path = self.report_dir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.md"
-        path.write_text(markdown)
+        path.write_text(markdown, encoding="utf-8")
         where = f"Saved to {path}."
         try:
             self._result("room_report", {"title": heading, "markdown": markdown, "by": self.actor_id})

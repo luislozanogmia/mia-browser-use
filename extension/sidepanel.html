@@ -33,14 +33,15 @@
         <strong id="setupTitle">One more step on this Mac</strong>
         <p id="setupText">Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and this panel connects by itself.</p>
         <a class="wide primary setup-download" id="downloadBtn" href="#" target="_blank" rel="noopener">Download the Mia installer</a>
+        <p class="error" id="setupUnsupported" hidden>Mia's helper runs on macOS, Windows and Linux. This computer isn't one of those yet.</p>
         <ol class="setup-steps" id="setupSteps">
           <li>Open the download (bottom of Chrome, or your Downloads folder)</li>
-          <li>Click <b>Install</b>, then enter your Mac password when asked</li>
+          <li>Click <b>Install</b></li>
           <li>Come back here. This panel turns green on its own</li>
         </ol>
         <details class="setup-what">
           <summary>What the installer adds</summary>
-          <p>The Mia helper (its own copy of Python and Mia's programs, in /Library/Application Support/Ghost), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and everything is removed by the uninstaller in that folder.</p>
+          <p id="setupWhat">The Mia helper (its own copy of Python and Mia's programs), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it.</p>
         </details>
       </div>
       <details class="setup-advanced" id="setupAdvanced">

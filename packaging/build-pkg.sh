@@ -33,7 +33,7 @@ rm -rf "$BUILD" && mkdir -p "$STAGE/app"
 
 echo "→ Python $PY_VERSION (standalone, arm64)"
 uv python install "$PY_VERSION" >/dev/null
-PY_SRC="$(dirname "$(dirname "$(uv python find "$PY_VERSION")")")"
+PY_SRC="$(dirname "$(dirname "$(uv python find --system "$PY_VERSION")")")"
 PY_SRC="$(cd "$PY_SRC" && pwd -P)"
 cp -R "$PY_SRC" "$STAGE/python"
 rm -f "$STAGE"/python/lib/python*/EXTERNALLY-MANAGED

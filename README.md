@@ -17,9 +17,11 @@ for browser credentials and has no command to export a browser session.
 
 ## Install
 
-For everyday use, build the Mac installer with `packaging/build-pkg.sh` and
-double-click `Mia-Browser-Use-<version>.pkg`. It brings its own Python, starts
-Mia by itself, and opens a page in Chrome that shows how to add the extension.
+For everyday use there is one installer per OS, each with its own Python and the
+helper Chrome starts on demand: Mac `packaging/build-pkg.sh` (a .pkg), Windows
+`packaging/windows/build.ps1` (a per-user Setup.exe, no administrator prompt) and
+Linux `packaging/build-deb.sh` (a .deb). Double-click it, then add Mia from the
+Chrome Web Store, or the other way round: Chrome offers the extension by itself.
 
 For development:
 

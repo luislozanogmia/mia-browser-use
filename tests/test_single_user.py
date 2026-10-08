@@ -37,7 +37,7 @@ class FakeRoom:
 
 class ExtensionSourceTests(unittest.TestCase):
     def test_every_open_tab_is_shared_by_itself_and_unshared_when_it_closes(self):
-        source = (EXT / "background.js").read_text()
+        source = (EXT / "background.js").read_text(encoding="utf-8")
         self.assertIn("function shareTab(tab)", source)
         self.assertIn("function leavePage(tabId, key)", source)
         self.assertIn("chrome.tabs.onRemoved.addListener(tabId => {", source)
@@ -46,8 +46,8 @@ class ExtensionSourceTests(unittest.TestCase):
             self.assertNotIn(gone, source, gone)
 
     def test_side_panel_has_no_room_sharing_or_follow_me(self):
-        html = (EXT / "sidepanel.html").read_text()
-        js = (EXT / "sidepanel.js").read_text()
+        html = (EXT / "sidepanel.html").read_text(encoding="utf-8")
+        js = (EXT / "sidepanel.js").read_text(encoding="utf-8")
         for gone in ("shareBtn", "unshareBtn", "followMe", "roomLabel", "room-pill", "faces"):
             self.assertNotIn(gone, html, gone)
             self.assertNotIn(gone, js, gone)
@@ -55,13 +55,13 @@ class ExtensionSourceTests(unittest.TestCase):
             self.assertIn(kept, html, kept)
 
     def test_page_script_only_wires_the_ask_box(self):
-        source = (EXT / "human_presence.js").read_text()
+        source = (EXT / "human_presence.js").read_text(encoding="utf-8")
         self.assertIn('type: "ask"', source)
         self.assertNotIn("pointermove", source)
         self.assertNotIn("human_presence", source.split("\n", 8)[-1])  # no presence messages sent
 
     def test_bots_are_not_named_after_an_owner(self):
-        source = (EXT / "overlay.js").read_text()
+        source = (EXT / "overlay.js").read_text(encoding="utf-8")
         self.assertNotIn("${owner}'s", source)
         self.assertNotIn("owner_color", source.split("function makeNodes")[1].split("const list = layer()")[0])
 

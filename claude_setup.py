@@ -11,11 +11,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import subprocess
 import time
 from pathlib import Path
 
+import native_host
+
 INSTALL_SCRIPT = "https://claude.ai/install.sh"
+INSTALL_SCRIPT_WINDOWS = "https://claude.ai/install.ps1"
 STATUS_TTL = 30.0
 LOGIN_WAIT_SECONDS = 3.0
 
@@ -27,8 +31,11 @@ def binary() -> str | None:
     if found:
         return found
     # Where the official installer puts it, in case PATH doesn't have it yet.
-    local = Path.home() / ".local" / "bin" / "claude"
-    return str(local) if local.is_file() and os.access(local, os.X_OK) else None
+    for name in (("claude.exe", "claude.cmd") if sys.platform == "win32" else ("claude",)):
+        local = Path.home() / ".local" / "bin" / name
+        if local.is_file() and os.access(local, os.X_OK):
+            return str(local)
+    return None
 
 
 def status(fresh: bool = False) -> dict:
@@ -57,10 +64,16 @@ def _log():
 
 def install() -> bool:
     """Run the official installer and wait for it. True when `claude` exists afterwards."""
+    if sys.platform == "win32":
+        command = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                   f"irm {INSTALL_SCRIPT_WINDOWS} | iex"]
+    else:
+        curl = shutil.which("curl") or "/usr/bin/curl"
+        command = ["/bin/bash", "-c", f"set -o pipefail; {curl} -fsSL {INSTALL_SCRIPT} | /bin/bash"]
     with _log() as log:
         try:
-            subprocess.run(["/bin/bash", "-c", f"set -o pipefail; /usr/bin/curl -fsSL {INSTALL_SCRIPT} | /bin/bash"],
-                           stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=600)
+            subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=600,
+                           **native_host.detached_popen_kwargs(False))
         except (OSError, subprocess.SubprocessError):
             return False
     _cache["value"] = None
@@ -75,7 +88,7 @@ def login() -> bool:
         raise RuntimeError("Claude Code isn't installed")
     log = _log()
     proc = subprocess.Popen([claude, "auth", "login", "--claudeai"], stdin=subprocess.DEVNULL,
-                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                            stdout=log, stderr=subprocess.STDOUT, **native_host.detached_popen_kwargs(True))
     log.close()
     try:
         code = proc.wait(LOGIN_WAIT_SECONDS)

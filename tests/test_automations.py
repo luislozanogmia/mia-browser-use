@@ -102,7 +102,8 @@ def test_store_is_private_and_replaces_by_name(tmp_path):
     first = store.add(clean(SCRIPT))
     second = store.add(clean({**SCRIPT, "about": "Better"}))
     assert first["id"] == second["id"] and len(store.list()) == 1
-    assert oct(os.stat(tmp_path / "automations.json").st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # Windows has no POSIX mode bits
+        assert oct(os.stat(tmp_path / "automations.json").st_mode & 0o777) == "0o600"
     assert AutomationStore(tmp_path / "automations.json").get(first["id"])["about"] == "Better"
     assert store.delete(first["id"]) and not store.list()
 

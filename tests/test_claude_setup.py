@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,15 @@ import claude_setup
 
 
 def fake_claude(folder: Path, status: dict | None, login_exit: int = 0, login_sleep: float = 0) -> str:
+    if sys.platform == "win32":
+        path = folder / "claude.cmd"
+        answer = json.dumps(status) if status is not None else "oops"
+        path.write_text(
+            "@echo off\r\n"
+            f"if \"%1 %2\"==\"auth status\" (echo {answer}& exit /b 0)\r\n"
+            f"if \"%1 %2\"==\"auth login\" (ping -n {int(login_sleep) + 1} 127.0.0.1 >nul & exit /b {login_exit})\r\n"
+            "exit /b 2\r\n")
+        return str(path)
     path = folder / "claude"
     path.write_text(
         "#!/bin/sh\n"
@@ -21,7 +31,7 @@ def fake_claude(folder: Path, status: dict | None, login_exit: int = 0, login_sl
 
 class ClaudeSetupTests(unittest.TestCase):
     def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
+        self._dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = Path(self._dir.name)
         claude_setup._cache.update(at=0.0, value=None)
         self.home = mock.patch.object(claude_setup.Path, "home", return_value=self.tmp)

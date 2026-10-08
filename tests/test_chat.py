@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 
 import ghost_chat
@@ -228,6 +229,9 @@ def test_panel_sees_claude_status_and_can_start_setup():
         hub.claude_status = lambda fresh=False: {"installed": True, "signed_in": False}
         await hub.handle({"action": "sync"})
         assert states[-1]["claude"] == {"installed": True, "signed_in": False, "busy": ""}
+        # The sync started the automation scheduler; with sleep mocked below it would spin forever.
+        if hub.scheduler is not None:
+            hub.scheduler.cancel()
         calls = []
         with mock.patch("claude_setup.status", side_effect=[{"installed": True, "signed_in": False},
                                                               {"installed": True, "signed_in": False},
@@ -565,7 +569,8 @@ def test_chats_are_saved_survive_a_restart_and_can_be_reopened(tmp_path):
         hub.say("you", "find  me\nAI research jobs")
         hub.say("mia", "Here are three.")
         first = hub.chat_id
-        assert oct((tmp_path / "chats" / f"{first}.json").stat().st_mode & 0o777) == "0o600"
+        if os.name != "nt":  # Windows has no POSIX mode bits
+            assert oct((tmp_path / "chats" / f"{first}.json").stat().st_mode & 0o777) == "0o600"
 
         # A restart (closing Chrome) carries on with the same conversation.
         again = ChatHub(browser, push, store=store)

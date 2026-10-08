@@ -1,5 +1,8 @@
 """Pair the Chrome extension with the bridge, and start the bridge if it's down.
 
+Runs on macOS, Linux and Windows: the installer for each puts this program where
+Chrome can start it (a host manifest on macOS/Linux, a registry key on Windows).
+
 Chrome starts this program when the Ghost extension asks for it
 (chrome.runtime.sendNativeMessage). Chrome only lets extensions listed in the
 host manifest's allowed_origins start it, and install_native_host() lists just
@@ -14,7 +17,7 @@ ghost_eval is never turned on this way.
 from __future__ import annotations
 
 import base64
-import fcntl
+import contextlib
 import hashlib
 import json
 import os
@@ -41,6 +44,41 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 START_WAIT_SECONDS = 6.0
+WINDOWS = sys.platform == "win32"
+
+
+@contextlib.contextmanager
+def locked(path: Path):
+    """Hold an exclusive lock on `path` (fcntl on Unix, msvcrt on Windows)."""
+    with open(path, "a+") as handle:
+        if WINDOWS:
+            import msvcrt
+            handle.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+
+
+def detached_popen_kwargs(detach: bool) -> dict:
+    """How to start a child that must outlive this short-lived host (and show no window)."""
+    if WINDOWS:
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        if detach:
+            flags |= subprocess.DETACHED_PROCESS
+        return {"creationflags": flags}
+    return {"start_new_session": detach, "close_fds": True}
 
 
 def read_message(stream) -> dict | None:
@@ -89,13 +127,13 @@ def save_bridge_config(port: int, room: str | None = None, room_url: str | None 
     """Remember how the bridge was started, so the extension can start it the same way."""
     config = clean_bridge_config({"port": port, "room": room, "room_url": room_url, "me": me, "name": name, "color": color})
     GHOST_DIR.mkdir(mode=0o700, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+    CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     CONFIG_PATH.chmod(0o600)
 
 
 def load_bridge_config() -> dict:
     try:
-        return clean_bridge_config(json.loads(CONFIG_PATH.read_text()))
+        return clean_bridge_config(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return clean_bridge_config({})
 
@@ -124,7 +162,8 @@ def wait_listening(host: str, port: int, seconds: float = START_WAIT_SECONDS) ->
 def child_path() -> str:
     """Chrome starts hosts with PATH=/usr/bin:/bin; add where the claude CLI usually lives."""
     home = Path.home()
-    extra = [home / ".local" / "bin", home / ".claude" / "local", Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
+    extra = [home / ".local" / "bin", home / ".claude" / "local", Path("/opt/homebrew/bin"), Path("/usr/local/bin"),
+             home / "AppData" / "Roaming" / "npm"]
     parts = [str(d) for d in extra if d.is_dir()] + os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep)
     return os.pathsep.join(dict.fromkeys(p for p in parts if p))
 
@@ -138,8 +177,8 @@ def spawn(args: list[str], detach: bool = True) -> subprocess.Popen:
             [sys.executable, str(REPO_ROOT / "ghost_cli.py"), *args],
             # The app folder may be read-only (installed copy), so run from ~/.ghost.
             cwd=str(GHOST_DIR), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-            start_new_session=detach, close_fds=True,
-            env={**os.environ, "PATH": child_path(), "PYTHONUNBUFFERED": "1"},
+            env={**os.environ, "PATH": child_path(), "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"},
+            **detached_popen_kwargs(detach),
         )
 
 
@@ -149,8 +188,7 @@ def ensure_up(config: dict) -> str:
 
     GHOST_DIR.mkdir(mode=0o700, exist_ok=True)
     # Two quick asks from the extension must not start two supervisors.
-    with open(LOCK_PATH, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(LOCK_PATH):
         if up_running():
             return "running"
         bridge_was_up = is_listening("127.0.0.1", config["port"])
@@ -192,7 +230,7 @@ def extension_id(extension_dir: Path) -> str:
     a key, Chrome derives the id from the folder's path instead.
     """
     try:
-        key = json.loads((extension_dir / "manifest.json").read_text()).get("key")
+        key = json.loads((extension_dir / "manifest.json").read_text(encoding="utf-8")).get("key")
     except (OSError, ValueError):
         key = None
     if isinstance(key, str) and key:
@@ -200,8 +238,19 @@ def extension_id(extension_dir: Path) -> str:
     return _chrome_id(hashlib.sha256(str(extension_dir.resolve()).encode()).hexdigest())
 
 
+# Windows: Chrome finds the host through the registry, one key per browser.
+WINDOWS_REGISTRY_KEYS = [
+    r"Software\Google\Chrome\NativeMessagingHosts",
+    r"Software\Chromium\NativeMessagingHosts",
+    r"Software\Microsoft\Edge\NativeMessagingHosts",
+    r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
+]
+
+
 def manifest_dirs() -> list[Path]:
     home = Path.home()
+    if WINDOWS:
+        return [home / ".ghost"]  # the registry points Chrome here
     if sys.platform == "darwin":
         base = home / "Library" / "Application Support"
         browsers = ["Google/Chrome", "Google/Chrome Beta", "Google/Chrome Canary", "Chromium", "BraveSoftware/Brave-Browser"]
@@ -217,9 +266,13 @@ def install_native_host(extension_dir: Path | None = None, python: str | None = 
     ghost_dir = Path.home() / ".ghost"
     ghost_dir.mkdir(mode=0o700, exist_ok=True)
     # Chrome starts hosts with a bare environment, so name the interpreter exactly.
-    launcher = ghost_dir / "native-host"
-    launcher.write_text(f'#!/bin/sh\nexec "{python or sys.executable}" "{REPO_ROOT / "native_host.py"}" "$@"\n')
-    launcher.chmod(0o700)
+    if WINDOWS:
+        launcher = ghost_dir / "native-host.bat"
+        launcher.write_text(f'@echo off\r\n"{python or sys.executable}" "{REPO_ROOT / "native_host.py"}" %*\r\n', encoding="utf-8")
+    else:
+        launcher = ghost_dir / "native-host"
+        launcher.write_text(f'#!/bin/sh\nexec "{python or sys.executable}" "{REPO_ROOT / "native_host.py"}" "$@"\n', encoding="utf-8")
+        launcher.chmod(0o700)
     ext_id = extension_id(extension_dir)
     manifest = {
         "name": HOST_NAME,
@@ -232,9 +285,20 @@ def install_native_host(extension_dir: Path | None = None, python: str | None = 
     for folder in manifest_dirs():
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{HOST_NAME}.json"
-        path.write_text(json.dumps(manifest, indent=2) + "\n")
+        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         written.append(str(path))
+    if WINDOWS:
+        register_windows_host(Path(written[0]))
     return {"extension_id": ext_id, "launcher": str(launcher), "manifests": written}
+
+
+def register_windows_host(manifest_path: Path) -> None:
+    """Point every Chrome-family browser at the host manifest (current user, no admin)."""
+    import winreg
+
+    for key in WINDOWS_REGISTRY_KEYS:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{key}\\{HOST_NAME}") as handle:
+            winreg.SetValueEx(handle, "", 0, winreg.REG_SZ, str(manifest_path))
 
 
 def main() -> None:

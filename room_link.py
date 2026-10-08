@@ -227,6 +227,7 @@ def load_room_key(room: str) -> Optional[str]:
         info = path.stat()
     except OSError:
         return None
-    if info.st_mode & 0o077 or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+    # Windows has no POSIX mode bits; the profile folder is protected by NTFS ACLs.
+    if (os.name != "nt" and info.st_mode & 0o077) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
         raise ValueError(f"Room key file must be private to you (0600): {path}")
     return path.read_text(encoding="utf-8").strip() or None

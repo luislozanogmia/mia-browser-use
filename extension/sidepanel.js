@@ -592,10 +592,29 @@ function setupDetail(helper) {
 }
 
 // The card for the one step the extension can't do itself: the installer.
+const SETUP_STEPS = {
+  mac: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install, then enter your Mac password when asked",
+        "Come back here. This panel turns green on its own"],
+  win: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install. No administrator password is needed",
+        "Come back here. This panel turns green on its own"],
+  linux: ["Open the download (bottom of Chrome, or your Downloads folder)", "Your software installer opens; click Install and enter your password",
+          "Come back here. This panel turns green on its own"],
+};
+const SETUP_WHAT = {
+  mac: "The Mia helper (its own copy of Python and Mia's programs, in /Library/Application Support/Ghost), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and everything is removed by the uninstaller in that folder.",
+  win: "The Mia helper (its own copy of Python and Mia's programs, in your user folder under AppData\\Local\\Mia), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and Mia appears in Windows' Installed apps to uninstall.",
+  linux: "The Mia helper (its own copy of Python and Mia's programs, in /opt/mia-browser-use), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it; remove it with your package manager (mia-browser-use).",
+};
+
 function renderSetup(info) {
   const paired = Boolean(info.paired) || info.helper === "ok";
   $("setupCard").hidden = paired;
   $("downloadBtn").href = info.installer_url || "#";
+  $("downloadBtn").hidden = !info.installer_url;
+  $("setupUnsupported").hidden = Boolean(info.installer_url);
+  const os = SETUP_STEPS[info.os] ? info.os : "mac";
+  $("setupSteps").replaceChildren(...SETUP_STEPS[os].map(text => { const li = document.createElement("li"); li.textContent = text; return li; }));
+  $("setupWhat").textContent = SETUP_WHAT[os];
   if (info.helper === "outdated") {
     $("setupTitle").textContent = "Update the Mia helper on this Mac";
     $("setupText").textContent = "This version of Mia needs a newer helper than the one installed. Download the current installer and run it; your chats and settings stay.";

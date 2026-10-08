@@ -37,12 +37,12 @@
   </header>
 
   <section class="card" id="setup">
-    <h2>One more step on this Mac</h2>
+    <h2 id="setupTitle">One more step on this computer</h2>
     <p>Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and Mia connects by herself.</p>
     <a class="btn" id="download" href="#" target="_blank" rel="noopener">Download the Mia installer</a>
     <ol>
       <li>Open the download (bottom of this window, or your Downloads folder)</li>
-      <li>Click <b>Install</b> and enter your Mac password when asked</li>
+      <li>Click <b>Install</b> (and enter your password if your computer asks)</li>
       <li>Come back to this tab. It turns green when Mia is ready</li>
     </ol>
   </section>
@@ -55,7 +55,7 @@
   <section class="card">
     <details>
       <summary>What the installer adds, and how to remove it</summary>
-      <p style="margin-top:10px">It puts the Mia helper in <b>/Library/Application Support/Ghost</b>: its own copy of Python and Mia's programs, plus the small program Chrome uses to start them. If you don't have Claude Code, it installs it with Anthropic's official installer; Mia answers with your own Claude account, under Anthropic's terms. Nothing runs until Chrome asks for it. The <b>uninstall.sh</b> file in that folder removes everything.</p>
+      <p style="margin-top:10px">It puts the Mia helper on your computer (<b>/Library/Application Support/Ghost</b> on a Mac, <b>AppData\Local\Mia</b> on Windows, <b>/opt/mia-browser-use</b> on Linux): its own copy of Python and Mia's programs, plus the small program Chrome uses to start them. If you don't have Claude Code, it installs it with Anthropic's official installer; Mia answers with your own Claude account, under Anthropic's terms. Nothing runs until Chrome asks for it. Remove it with <b>uninstall.sh</b> in that folder on a Mac, from Installed apps on Windows, or with your package manager on Linux.</p>
     </details>
   </section>
 </main>

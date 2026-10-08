@@ -10,7 +10,7 @@ EXPECTED_VERSION = "0.5.4"
 
 class VersionTests(unittest.TestCase):
     def test_python_package_version(self):
-        module = ast.parse((REPO_ROOT / "__init__.py").read_text())
+        module = ast.parse((REPO_ROOT / "__init__.py").read_text(encoding="utf-8"))
         versions = [
             node.value.value
             for node in module.body
@@ -21,15 +21,15 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(versions, [EXPECTED_VERSION])
 
     def test_chrome_extension_version(self):
-        manifest = json.loads((REPO_ROOT / "extension" / "manifest.json").read_text())
+        manifest = json.loads((REPO_ROOT / "extension" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], EXPECTED_VERSION)
 
     def test_chrome_extension_handshake_uses_manifest_version(self):
-        source = (REPO_ROOT / "extension" / "background.js").read_text()
+        source = (REPO_ROOT / "extension" / "background.js").read_text(encoding="utf-8")
         self.assertIn("version: chrome.runtime.getManifest().version", source)
 
     def test_chrome_extension_authenticates_before_marking_connected(self):
-        source = (REPO_ROOT / "extension" / "background.js").read_text()
+        source = (REPO_ROOT / "extension" / "background.js").read_text(encoding="utf-8")
         auth_send = source.index('type: "auth_init", client_nonce: clientNonce')
         self.assertNotIn('type: "auth", token', source)
         self.assertIn("ghost-ws-server-v1", source)
@@ -40,8 +40,8 @@ class VersionTests(unittest.TestCase):
         self.assertNotIn("ghost-bridge?", source)
 
     def test_chrome_extension_redacts_and_does_not_echo_typed_secrets(self):
-        source = (REPO_ROOT / "extension" / "background.js").read_text()
-        page = (REPO_ROOT / "extension" / "ghost_page.js").read_text()
+        source = (REPO_ROOT / "extension" / "background.js").read_text(encoding="utf-8")
+        page = (REPO_ROOT / "extension" / "ghost_page.js").read_text(encoding="utf-8")
         self.assertIn('(tag === "input" || tag === "textarea") && node.value', page)
         self.assertIn('? "[REDACTED]"', page)
         self.assertIn("const FORM_CONTROLS", page)
@@ -49,13 +49,13 @@ class VersionTests(unittest.TestCase):
         self.assertNotIn("return { typed: args.text }", source)
 
     def test_disconnect_unpairs_and_suppresses_reconnect(self):
-        source = (REPO_ROOT / "extension" / "background.js").read_text()
+        source = (REPO_ROOT / "extension" / "background.js").read_text(encoding="utf-8")
         self.assertIn("disconnect({ forgetToken: true })", source)
         self.assertIn("if (intentionallyDisconnected) return", source)
         self.assertIn('chrome.storage.local.remove("token")', source)
 
     def test_hermes_plugin_version(self):
-        manifest = (REPO_ROOT / "hermes-plugin" / "plugin.yaml").read_text()
+        manifest = (REPO_ROOT / "hermes-plugin" / "plugin.yaml").read_text(encoding="utf-8")
         self.assertIn(f"version: {EXPECTED_VERSION}", manifest)
 
 

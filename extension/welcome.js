@@ -6,6 +6,7 @@ const $ = id => document.getElementById(id);
 function show(info) {
   if (!info) return;
   $("download").href = info.installer_url || "#";
+  $("download").hidden = !info.installer_url;
   const ready = Boolean(info.connected);
   const paired = ready || Boolean(info.paired) || info.helper === "ok";
   $("setup").hidden = paired;

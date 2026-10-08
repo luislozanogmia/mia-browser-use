@@ -51,7 +51,7 @@ function constantTimeEqual(left, right) {
 // ---------------------------------------------------------------------------
 
 function getStatus() {
-  return { connected, paired: Boolean(token), helper, installer_url: INSTALLER_URL, port, version: chrome.runtime.getManifest().version };
+  return { connected, paired: Boolean(token), helper, installer_url: installerUrl(), os: platformOs, port, version: chrome.runtime.getManifest().version };
 }
 
 function setBadge(text, color) {
@@ -67,7 +67,13 @@ const NATIVE_HOST = "com.ghost.bridge";
 // Where the Mac installer lives. The extension can't install software itself (Chrome
 // doesn't allow it), so this is the one download a person makes; the installer puts the
 // helper in place and the extension connects by itself a few seconds later.
-const INSTALLER_URL = "https://github.com/luislozanogmia/mia-browser-use/releases/latest/download/Mia-Browser-Use.pkg";
+const RELEASES = "https://github.com/luislozanogmia/mia-browser-use/releases/latest/download/";
+const INSTALLERS = { mac: "Mia-Browser-Use.pkg", win: "Mia-Browser-Use-Setup.exe", linux: "mia-browser-use.deb" };
+let platformOs = "mac";
+chrome.runtime.getPlatformInfo().then(info => { platformOs = info.os; }).catch(() => {});
+function installerUrl() {
+  return INSTALLERS[platformOs] ? RELEASES + INSTALLERS[platformOs] : "";
+}
 const SETUP_RETRY_DELAY = 5000;
 let pairing = null;
 let bridgeJustStarted = false;

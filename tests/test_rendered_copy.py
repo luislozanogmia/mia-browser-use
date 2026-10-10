@@ -22,6 +22,22 @@ def test_copy_uses_rendered_spacing_and_keeps_literal_numbered_lines(tmp_path, r
     asyncio.run(main())
 
 
+def test_copy_holds_instead_of_silently_truncating_long_visible_text(tmp_path):
+    async def main():
+        hub = play_hub(TargetBrowser(), tmp_path)
+        requested = []
+        async def call(command, args):
+            requested.append(args.get('max_chars'))
+            return True, {'content': '', 'rendered_text': 'x' * 2001}
+        hub.call = call
+        values = {}
+        with pytest.raises(RuntimeError, match='exceeds the 2000-character Play value limit'):
+            await hub.play_step(task_for(hub), {'do': 'copy', 'css': '#article', 'as': 'intro'}, values)
+        assert requested[-1] == 2001
+        assert 'intro' not in values
+    asyncio.run(main())
+
+
 def test_empty_rendered_selector_does_not_copy_hidden_fallback(tmp_path):
     async def main():
         hub = play_hub(TargetBrowser(), tmp_path)

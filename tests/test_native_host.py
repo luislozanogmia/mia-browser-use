@@ -1,4 +1,5 @@
 import io
+import os
 import json
 import struct
 import unittest
@@ -46,10 +47,11 @@ class NativeHostTests(unittest.TestCase):
         with mock.patch.object(native_host.Path, "home", return_value=Path(self.tmp)), \
              mock.patch.object(native_host, "manifest_dirs", return_value=[Path(self.tmp) / "hosts"]):
             info = native_host.install_native_host(Path(self.tmp), python="/usr/bin/python3")
-        manifest = json.loads(Path(info["manifests"][0]).read_text())
+        manifest = json.loads(Path(info["manifests"][0]).read_text(encoding="utf-8"))
         self.assertEqual(manifest["allowed_origins"], [f"chrome-extension://{info['extension_id']}/"])
         self.assertEqual(manifest["name"], "com.ghost.bridge")
-        self.assertEqual(Path(info["launcher"]).stat().st_mode & 0o777, 0o700)
+        if os.name != "nt":  # Windows has no POSIX mode bits
+            self.assertEqual(Path(info["launcher"]).stat().st_mode & 0o777, 0o700)
 
     def test_pair_starts_the_supervisor_once(self):
         with mock.patch.object(native_host, "GHOST_DIR", Path(self.tmp)), \
@@ -82,7 +84,8 @@ class NativeHostTests(unittest.TestCase):
              mock.patch.object(native_host, "CONFIG_PATH", Path(self.tmp) / "bridge.json"):
             native_host.save_bridge_config(9377, "demo", "ws://127.0.0.1:9390", "luis", "Luis", "#3b82f6")
             self.assertEqual(native_host.load_bridge_config()["room"], "demo")
-            self.assertEqual((Path(self.tmp) / "bridge.json").stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual((Path(self.tmp) / "bridge.json").stat().st_mode & 0o777, 0o600)
 
     def setUp(self):
         import tempfile

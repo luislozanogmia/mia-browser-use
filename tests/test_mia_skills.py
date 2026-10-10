@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import ghost_chat
 import mia_skills
@@ -11,7 +12,7 @@ def test_both_skills_are_listed_with_where_they_are_and_what_they_are_for():
     skills = {s["name"]: s for s in mia_skills.index()}
     assert set(skills) >= {"building-automations", "managing-bots"}
     for skill in skills.values():
-        assert skill["path"].endswith("/SKILL.md") and len(skill["description"]) > 60
+        assert Path(skill["path"]).name == "SKILL.md" and len(skill["description"]) > 60
     index = mia_skills.prompt_index()
     assert skills["managing-bots"]["path"] in index and "load_skills" in index
     # The builders' skill: they always get it, so it isn't in Mia's list.

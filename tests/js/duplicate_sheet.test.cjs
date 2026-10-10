@@ -29,11 +29,20 @@ test('missing, ambiguous, mismatched, absent key and changed sheet all hold befo
     [[row],{row,unique:'researched:Microsoft'},[row,['Changed','new key']]],
   ]) await assert.rejects(setup(before,after??before).call({...args,require_existing:true}),/DUPLICATE_CHECK_HELD/);
 });
+test('normal saved Play reports duplicate-key conflicts instead of hiding changed results', async()=>{
+  await assert.rejects(
+    setup([row,row]).call({row,unique:'researched:Microsoft'}),
+    /more than one row has this unique key/);
+  await assert.rejects(
+    setup([['Changed','researched:Microsoft']]).call({row,unique:'researched:Microsoft'}),
+    /existing row differs from the current payload/);
+});
 test('literal percent headlines do not break later duplicate-key lookup', async()=>{
   const data=[['Company','Headline','Key'],['Other','Growth 200% in AI','researched:Other'],
               ['Salesforce','Growth 200% in AI','researched:Salesforce']];
   const row=data[2];
   assert.equal((await setup(data).call({row,unique:'researched:Salesforce'})).row,3);
   assert.equal((await setup(data).call({row,unique:'researched:Salesforce',require_existing:true})).no_write,true);
-  assert.equal((await setup([['HTTPS://WWW.EXAMPLE.COM/a%20b/?q=x']]).call({row:['ignored'],unique:'https://example.com/a b'})).already,true);
+  const urlRow=['HTTPS://WWW.EXAMPLE.COM/a%20b/?q=x'];
+  assert.equal((await setup([urlRow]).call({row:urlRow,unique:'https://example.com/a b'})).already,true);
 });

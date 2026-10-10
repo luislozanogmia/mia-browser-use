@@ -40,7 +40,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import urlsplit
 
 # A question can carry 4000 chars of selected text, 8 links and an anchor: about 20 KB.
 MAX_MESSAGE_BYTES = 32 * 1024
@@ -83,15 +83,6 @@ def page_key(url: Any) -> Optional[str]:
         return None
     host = parts.hostname + (f":{parts.port}" if parts.port else "")
     return f"{parts.scheme}://{host}{parts.path.rstrip('/') or '/'}"
-
-
-def room_origin(url: Any) -> Optional[str]:
-    """The only site address sent for a private room invitation."""
-    key = page_key(url)
-    if not key:
-        return None
-    parts = urlsplit(key)
-    return f"{parts.scheme}://{parts.netloc}/"
 
 
 def key_digest(key: str) -> bytes:
@@ -137,21 +128,14 @@ def clean_rect(value: Any) -> Optional[dict]:
     return rect if all(v is not None for v in rect.values()) else None
 
 
-ROOM_QUERY_KEYS = frozenset({
-    "q", "query", "search", "term", "page", "start", "offset", "sort",
-    "filter", "view", "tab", "gid", "lang", "language",
-})
-TOKENISH_VALUE = re.compile(r"^(?:[A-Za-z0-9_-]{32,}|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$")
-
-
-def room_safe_href(url: Any) -> Optional[str]:
-    """Keep linked sites usable without sending their path or search terms to a room."""
-    return room_origin(url)
-
-
 def page_href(url: Any, key: str) -> str:
-    """A question's room-visible address, with only ordinary navigation parameters."""
-    return room_safe_href(url) if page_key(url) == key else key
+    """The exact address a question was asked on (with its query, without the fragment).
+
+    Single-page apps (a YouTube search) change the query without loading a new page;
+    the question belongs to that address, not to every address with the same path."""
+    if not isinstance(url, str) or page_key(url) != key:
+        return key
+    return url.split("#", 1)[0][:2000]
 
 
 def clean_language(value: Any) -> str:
@@ -168,9 +152,7 @@ def clean_links(value: Any) -> list[dict]:
     for item in value if isinstance(value, list) else []:
         href = item.get("href") if isinstance(item, dict) else None
         if isinstance(href, str) and re.match(r"^https?://[^\s]{1,990}$", href):
-            safe_href = room_safe_href(href)
-            if safe_href:
-                links.append({"href": safe_href, "text": _text(item.get("text"), 200)})
+            links.append({"href": href, "text": _text(item.get("text"), 200)})
         if len(links) == 8:
             break
     return links
@@ -462,14 +444,7 @@ class RoomHub:
         if key not in room.pages and len(room.pages) >= MAX_PAGES_PER_ROOM:
             raise RoomError("LIMIT", "Too many shared pages")
         by = next(iter(member.actors))
-        origin = room_origin(page.get("origin")) if page.get("origin") else None
-        if page.get("origin") and origin != page.get("origin"):
-            raise RoomError("INVALID", "page.origin must be a site origin")
-        href = page.get("href") if isinstance(page.get("href"), str) else None
-        if href and (not origin or room_origin(href) != origin or len(href) > 2048):
-            raise RoomError("INVALID", "page.href must belong to page.origin")
-        room.pages[key] = {"url": key, "title": _text(page.get("title"), 200), "by": by,
-                           **({"origin": origin} if origin else {}), **({"href": href} if href else {})}
+        room.pages[key] = {"url": key, "title": _text(page.get("title"), 200), "by": by}
         return self._to_all(room, {"type": "page", "event": "shared", "page": room.pages[key]})
 
     def _on_unshare(self, conn_id: str, message: dict) -> Outbound:
@@ -578,7 +553,7 @@ class RoomHub:
         humans = [a for a in member.actors.values() if a["kind"] == "human"]
         if not humans:
             raise RoomError("FORBIDDEN", "Only a human can ask")
-        key, page = self._shared_page(room, message.get("url"))
+        key, _page = self._shared_page(room, message.get("url"))
         question = _text(message.get("question"), 600)
         if not question:
             raise RoomError("INVALID", "question is required")
@@ -600,7 +575,7 @@ class RoomHub:
             "target": clean_anchor(message.get("target")) or (first["target"] if first else None),
             "text": _text(message.get("text"), 4000) or (first["text"] if first else ""),
             "question": question,
-            "href": page.get("href") or page.get("origin") or page_href(message.get("url"), key),
+            "href": page_href(message.get("url"), key),
             "thread": thread,
             "links": clean_links(message.get("links")) or (first["links"] if first else []),
             "language": clean_language(message.get("language")),

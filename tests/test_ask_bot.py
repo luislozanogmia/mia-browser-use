@@ -1,25 +1,8 @@
 import unittest
 
 import json
-from unittest import mock
 
-import ask_bot
 from ask_bot import AskBot, build_prompt, image_block, split_answer, stream_result
-
-
-def test_room_answers_have_no_web_tools_and_solo_answers_keep_them():
-    requested = []
-
-    def fake_run(*args, **kwargs):
-        requested.append(kwargs.get("tools"))
-        return lambda *_: "Answer"
-
-    with mock.patch.object(ask_bot, "claude_run", side_effect=fake_run):
-        ask_bot.claude_answer("model", room_only=True)(ASK, {"content": "Private page"})
-        assert requested == [""]
-        requested.clear()
-        ask_bot.claude_answer("model")(ASK, {"content": "Public page"})
-        assert requested == [ask_bot.WEB_TOOLS, ask_bot.WEB_TOOLS]
 
 ASK = {
     "id": "q1", "url": "https://en.wikipedia.org/wiki/Dinosaur", "question": "whats this?",
@@ -29,22 +12,20 @@ ASK = {
 
 
 class FakeBridge:
-    def __init__(self, asks, accepted=True):
+    def __init__(self, asks):
         self.asks = asks
-        self.accepted = accepted
         self.calls = []
 
     def __call__(self, command, args=None, timeout=None):
         self.calls.append((command, args))
         if command == "ghost_room":
             return {"asks": self.asks}
-        if command == "room_read":
+        if command == "ghost_read":
             return {"title": "Dinosaur - Wikipedia", "content": "Intro. " * 3000 + "Research by Baron et al. changed things. " + "Tail. " * 3000}
         if command == "room_ask_image":
             return {"image": "data:image/jpeg;base64,QUJD"}
-        if command == "room_approved_tabs":
-            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology",
-                              "room_url": ASK["url"]}] if self.accepted else []}
+        if command == "ghost_tab_list":
+            return {"tabs": [{"id": 7, "url": "https://en.wikipedia.org/wiki/Dinosaur#Etymology"}]}
         return {}
 
 
@@ -79,11 +60,6 @@ class AskBotTests(unittest.TestCase):
         AskBot("claude", lambda ask, page=None: "x", call=bridge).poll()
         self.assertFalse([c for c, _ in bridge.calls if c == "ghost_suggest"])
 
-    def test_unaccepted_matching_tab_is_never_read(self):
-        bridge = FakeBridge([ASK], accepted=False)
-        AskBot("claude", lambda ask, page=None: "x", call=bridge).poll()
-        self.assertFalse([c for c, _ in bridge.calls if c in {"room_read", "ghost_suggest"}])
-
     def test_model_sees_the_page_around_the_selection(self):
         seen = {}
 
@@ -113,7 +89,10 @@ class AskBotTests(unittest.TestCase):
         prompt = build_prompt(ASK)
         self.assertIn("<<<\nwhats this?\n>>>", prompt)
         self.assertIn("Question from Luis", prompt)
-        self.assertEqual(split_answer("**Title**\n\nline one\nline two"), ("Title", "line one line two"))
+        self.assertEqual(split_answer("**Title**\n\nline one\nline two"), ("Title", "line one\nline two"))
+        # Bullets keep their lines; bold in the title line is dropped, since the card draws the title plain.
+        title, body = split_answer("Profile of **Carlos Arenas**\n- **1st**: connected\n\n\n\n- **Title**:  BDM\n")
+        self.assertEqual((title, body), ("Profile of Carlos Arenas", "- **1st**: connected\n\n- **Title**: BDM"))
         self.assertEqual(split_answer(""), ("No answer", ""))
 
     def test_follow_up_prompt_carries_the_conversation(self):

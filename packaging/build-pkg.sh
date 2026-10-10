@@ -6,16 +6,18 @@
 #
 #   packaging/build-pkg.sh
 #
-# Required for a distributable package:
-#   GHOST_SIGN_APP, GHOST_SIGN_INSTALLER, GHOST_NOTARY_PROFILE.
-# Set GHOST_DEV_UNSIGNED=1 only for a local test package, which is named UNSIGNED.
+# The extension's id is fixed by the key in extension/manifest.json, so the same id
+# covers the unpacked copy, the Chrome Web Store version and this package. The
+# package registers that id with Chrome ("External Extensions"), so Chrome offers the
+# store version by itself on its next start; people who added Mia from the store
+# first just see the panel turn green.
+#
 # Optional environment:
-#   GHOST_WEB_STORE_ID   the extension's Chrome Web Store id. Chrome then offers the
-#                        extension by itself, and the store version may start Ghost.
 #   GHOST_SIGN_APP       "Developer ID Application: ..." identity, signs the bundled programs.
 #   GHOST_SIGN_INSTALLER "Developer ID Installer: ..." identity, signs the .pkg.
 #   GHOST_NOTARY_PROFILE notarytool keychain profile; notarizes and staples the .pkg.
 set -euo pipefail
+export COPYFILE_DISABLE=1  # no ._ resource-fork files in the payload
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
@@ -24,26 +26,19 @@ ROOT="$BUILD/root"
 GHOST="/Library/Application Support/Ghost"
 STAGE="$ROOT$GHOST"
 VERSION="$(python3 -c "import json;print(json.load(open('$REPO/extension/manifest.json'))['version'])")"
-PY_VERSION="3.13.12"
-if [ "${GHOST_DEV_UNSIGNED:-}" != "1" ]; then
-  : "${GHOST_SIGN_APP:?Set GHOST_SIGN_APP to sign the bundled programs}"
-  : "${GHOST_SIGN_INSTALLER:?Set GHOST_SIGN_INSTALLER to sign the package}"
-  : "${GHOST_NOTARY_PROFILE:?Set GHOST_NOTARY_PROFILE to notarize the package}"
-fi
-SUFFIX=""
-[ "${GHOST_DEV_UNSIGNED:-}" = "1" ] && SUFFIX="-UNSIGNED"
-OUT="$REPO/build/Mia-Browser-Use-$VERSION$SUFFIX.pkg"
+PY_VERSION="${GHOST_PYTHON_VERSION:-3.13}"
+OUT="$REPO/build/Mia-Browser-Use-$VERSION.pkg"
 
 rm -rf "$BUILD" && mkdir -p "$STAGE/app"
 
 echo "→ Python $PY_VERSION (standalone, arm64)"
 uv python install "$PY_VERSION" >/dev/null
-PY_SRC="$(dirname "$(dirname "$(uv python find "$PY_VERSION")")")"
+PY_SRC="$(dirname "$(dirname "$(uv python find --system "$PY_VERSION")")")"
 PY_SRC="$(cd "$PY_SRC" && pwd -P)"
 cp -R "$PY_SRC" "$STAGE/python"
 rm -f "$STAGE"/python/lib/python*/EXTERNALLY-MANAGED
 PY="$STAGE/python/bin/python3"
-uv pip install --quiet --python "$PY" --require-hashes --only-binary :all: -r "$HERE/requirements.lock"
+uv pip install --quiet --python "$PY" -r "$REPO/requirements.txt"
 
 echo "→ Ghost $VERSION"
 for f in "$REPO"/*.py "$REPO/mia-browser-use"; do cp "$f" "$STAGE/app/"; done
@@ -60,14 +55,10 @@ LAUNCH
 chmod 755 "$STAGE/native-host"
 cp "$HERE/uninstall.sh" "$STAGE/uninstall.sh" && chmod 755 "$STAGE/uninstall.sh"
 
-# Which extensions may start the helper: the copy loaded from the installed folder,
-# and the Chrome Web Store version when its id is known.
-UNPACKED_ID="$(cd "$REPO" && "$PY" -c "from pathlib import Path; from native_host import extension_id; print(extension_id(Path('$GHOST/app/extension')))")"
-ORIGINS="\"chrome-extension://$UNPACKED_ID/\""
-if [ -n "${GHOST_WEB_STORE_ID:-}" ]; then
-  [[ "$GHOST_WEB_STORE_ID" =~ ^[a-p]{32}$ ]] || { echo "GHOST_WEB_STORE_ID must be 32 letters a-p" >&2; exit 1; }
-  ORIGINS="$ORIGINS, \"chrome-extension://$GHOST_WEB_STORE_ID/\""
-fi
+# Which extension may start the helper: the one id the manifest key fixes.
+EXT_ID="$(cd "$REPO" && "$PY" -c "from pathlib import Path; from native_host import extension_id; print(extension_id(Path('extension')))")"
+[[ "$EXT_ID" =~ ^[a-p]{32}$ ]] || { echo "bad extension id: $EXT_ID" >&2; exit 1; }
+ORIGINS="\"chrome-extension://$EXT_ID/\""
 for dir in "Google/Chrome" "Chromium" "BraveSoftware/Brave-Browser" "Microsoft Edge"; do
   case "$dir" in Google/Chrome) target="$ROOT/Library/Google/Chrome/NativeMessagingHosts" ;;
                  *) target="$ROOT/Library/Application Support/$dir/NativeMessagingHosts" ;; esac
@@ -83,18 +74,18 @@ for dir in "Google/Chrome" "Chromium" "BraveSoftware/Brave-Browser" "Microsoft E
 JSON
 done
 
-# With a store id, Chrome offers the extension by itself on next start.
-if [ -n "${GHOST_WEB_STORE_ID:-}" ]; then
-  ext="$ROOT/Library/Application Support/Google/Chrome/External Extensions"
-  mkdir -p "$ext"
-  echo '{"external_update_url": "https://clients2.google.com/service/update2/crx"}' > "$ext/$GHOST_WEB_STORE_ID.json"
-fi
+# Chrome offers the store version of the extension by itself on its next start.
+ext="$ROOT/Library/Application Support/Google/Chrome/External Extensions"
+mkdir -p "$ext"
+echo '{"external_update_url": "https://clients2.google.com/service/update2/crx"}' > "$ext/$EXT_ID.json"
 
 if [ -n "${GHOST_SIGN_APP:-}" ]; then
   echo "→ Signing bundled programs"
   find "$STAGE" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0 |
     while IFS= read -r -d '' f; do
-      file -b "$f" | grep -q Mach-O && codesign --force --timestamp --options runtime --sign "$GHOST_SIGN_APP" "$f"
+      if file -b "$f" | grep -q Mach-O; then
+        codesign --force --timestamp --options runtime --sign "$GHOST_SIGN_APP" "$f" 2>&1 | grep -v 'replacing existing signature' || true
+      fi
     done
 fi
 
@@ -112,4 +103,7 @@ if [ -n "${GHOST_NOTARY_PROFILE:-}" ]; then
   xcrun notarytool submit "$OUT" --keychain-profile "$GHOST_NOTARY_PROFILE" --wait
   xcrun stapler staple "$OUT"
 fi
-echo "✓ $OUT ($(du -h "$OUT" | cut -f1))"
+# The extension links to a fixed name on GitHub Releases (.../releases/latest/download/Mia-Browser-Use.pkg).
+cp "$OUT" "$REPO/build/Mia-Browser-Use.pkg"
+echo "✓ $OUT ($(du -h "$OUT" | cut -f1)), also build/Mia-Browser-Use.pkg"
+echo "  extension id: $EXT_ID"

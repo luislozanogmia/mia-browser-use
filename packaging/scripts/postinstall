@@ -19,11 +19,7 @@ if [ ! -x "$USER_HOME/.local/bin/claude" ] && ! as_user /bin/bash -lc 'command -
     >> "/private/tmp/ghost-install-claude.log" 2>&1 || true
 fi
 
-# The store version installs itself; otherwise show how to load the extension.
-if ls "/Library/Application Support/Google/Chrome/External Extensions/"*.json >/dev/null 2>&1; then
-  exit 0
-fi
-printf %s "$GHOST/app/extension" | as_user pbcopy
-GUIDE="file://${GHOST// /%20}/app/extension/install-guide.html"
-as_user open -a "Google Chrome" "$GUIDE" 2>/dev/null || as_user open "$GUIDE"
+# The extension comes from the Chrome Web Store: this package registered its id with
+# Chrome, so Chrome offers it by itself on its next start. If it's already installed,
+# it connects by itself within seconds. Nothing more to open here.
 exit 0

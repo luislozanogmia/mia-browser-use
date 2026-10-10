@@ -156,6 +156,7 @@ class ContextCommandTests(unittest.TestCase):
         self.assertEqual(self._print("", "text"), "")
 
 
+@unittest.skipIf(sys.platform == "win32", "the in-app browser (Mac app) talks over a Unix socket")
 class ContextCommandEndToEndTests(unittest.TestCase):
     """Run the real CLI against the mock Hermes Desktop browser."""
 

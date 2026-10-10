@@ -17,12 +17,11 @@ for browser credentials and has no command to export a browser session.
 
 ## Install
 
-For everyday use, build the signed and notarized Mac installer with
-`packaging/build-pkg.sh` and double-click `Mia-Browser-Use-<version>.pkg`.
-The build requires the signing identities and notary profile described in the
-script; `GHOST_DEV_UNSIGNED=1` makes a clearly labeled local test package.
-The installer brings its own pinned Python and locked dependencies, starts
-Mia by itself, and opens a page in Chrome that shows how to add the extension.
+For everyday use there is one installer per OS, each with its own Python and the
+helper Chrome starts on demand: Mac `packaging/build-pkg.sh` (a .pkg), Windows
+`packaging/windows/build.ps1` (a per-user Setup.exe, no administrator prompt) and
+Linux `packaging/build-deb.sh` (a .deb). Double-click it, then add Mia from the
+Chrome Web Store, or the other way round: Chrome offers the extension by itself.
 
 For development:
 
@@ -45,9 +44,9 @@ token to paste and nothing to start by hand. Logs go to `~/.ghost/bridge.log`.
 
 Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
 
-- **Ask** reads the page and answers. **Do** turns your request into tasks for
-  bots, one bot per tab, shown in the panel's Bots list. Anything that sends,
-  posts, submits, buys or deletes waits for your approval.
+- Mia decides whether a request needs reading or action and sends bots to the
+  relevant tabs. Anything that sends, posts, submits, buys or deletes waits for
+  your approval. An explicit Ask request remains read-only.
 - **Ask on the page:** select text, or crop an area with Alt+Shift+A. The answer
   appears as a card on the page, and you can reply to it. Page bots can search
   the web when the page doesn't say enough.
@@ -55,16 +54,8 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
   still a normal click, and a drag crops.
 - **Reel:** every page and answer is saved as a screenshot, in this browser
   only. **Make PDF** turns it into a report.
-- **Rooms:** share a page with other people and their bots, and see each
-  other's cursors and answers (`mia-browser-use room --help`).
-  Room invitations show the site by default, using a private page ID rather
-  than sending its path or search terms. **Include full link** lets others
-  open the exact page and makes that address visible to the room. Room answer
-  bots use the accepted local page without web search; solo Mia chat keeps
-  its web research tools.
 
-Mia answers with your own Claude account through Claude Code. See the
-[third-party service disclosure](TERMS.md) for how Mia installs and uses it.
+Mia answers with your own Claude account through Claude Code.
 
 To build an automation as an ongoing goal, start a message with `/goal`, followed by the job and
 representative test destinations. Mia discovers the real page, tests one script step at a time, and
@@ -117,9 +108,9 @@ TUI, and desktop sessions. Set `page_context: false` to turn it off.
 `ghost_status`, `ghost_tab_list`, `ghost_tab_open`, `ghost_tab_switch`,
 `ghost_tab_close`, `ghost_navigate`, `ghost_vacuum`, `ghost_read`,
 `ghost_pdf_read`, `ghost_click`, `ghost_fill`, `ghost_key`, `ghost_eval`, `ghost_screenshot`,
-`ghost_scroll`, and `ghost_wait`. In Chrome, `ghost_show`, `ghost_suggest` and
-`ghost_room` also let agents show what they're working on, suggest changes the
-person accepts or rejects, and join rooms.
+`ghost_scroll`, and `ghost_wait`. In Chrome, `ghost_show` and `ghost_suggest`
+also let agents show what they're working on and suggest changes the person
+accepts or rejects.
 
 PDF reading is Chrome-only. The other listed commands are shared by Chrome and
 Hermes Desktop.

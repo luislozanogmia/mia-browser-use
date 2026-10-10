@@ -96,7 +96,6 @@ chrome.runtime.onMessage.addListener(msg => {
 
 function render(next) {
   state = next;
-  renderRoom(state.room);
   renderModels(state.models);
   renderLog(state.messages || []);
   renderTasks(state.tasks || [], state.agents || []);
@@ -119,30 +118,6 @@ function renderClaude(claude) {
     : "Mia answers with your Claude account. Sign in once and you're set.";
   $("claudeBtn").hidden = Boolean(busy);
   $("claudeBtn").textContent = claude.installed ? "Sign in to Claude" : "Set up Claude";
-}
-
-// What the room is called in this panel. Only a label: the room itself (what others join) keeps its id.
-let roomNames = {};
-let renaming = false;
-const roomLabel = room => roomNames[room.name] || "Room 1";
-
-function renderRoom(room) {
-  if (renaming) return;  // the pill is a text box right now
-  const pill = $("room"), faces = $("faces");
-  pill.hidden = !room;
-  faces.replaceChildren();
-  if (!room) return;
-  const people = room.members || [];
-  // People and bots counted apart: "1 person · 2 bots", not "3 here".
-  const humans = people.filter(m => m.kind !== "bot").length, bots = people.length - humans;
-  pill.textContent = `${roomLabel(room)} · ${humans} ${humans === 1 ? "person" : "people"}` +
-    (bots ? ` · ${bots} bot${bots === 1 ? "" : "s"}` : "");
-  pill.title = `Room “${room.name}”. Click to rename it here.`;
-  for (const m of people.slice(0, 6)) {
-    const dot = el("span", { title: m.name });
-    dot.style.background = /^#[0-9a-fA-F]{3,8}$/.test(m.color) ? m.color : "#B4B2A9";
-    faces.append(dot);
-  }
 }
 
 function renderModels(models) {
@@ -346,34 +321,6 @@ input.addEventListener("keydown", event => {
   }
 });
 $("stopAll").addEventListener("click", () => chat("stop_all"));
-// Click the room's name to rename it: Enter or clicking away saves, Esc cancels.
-$("room").addEventListener("click", () => {
-  const room = state?.room;
-  if (!room || renaming) return;
-  renaming = true;
-  const pill = $("room");
-  const box = el("input", { className: "room-pill", value: roomLabel(room), maxLength: 40, ariaLabel: "Room name" });
-  let done = false;
-  const finish = save => {
-    if (done) return;
-    done = true;
-    const name = box.value.trim();
-    if (save && name) {
-      roomNames = { ...roomNames, [room.name]: name };
-      chrome.storage.local.set({ roomNames });
-    }
-    box.replaceWith(pill);
-    renaming = false;
-    renderRoom(state?.room);
-  };
-  box.addEventListener("keydown", event => {
-    if (event.key === "Enter") finish(true);
-    if (event.key === "Escape") finish(false);
-  });
-  box.addEventListener("blur", () => finish(true));
-  pill.replaceWith(box);
-  box.select();
-});
 // The bots list starts collapsed: just the count until you open it.
 $("tasksToggle").addEventListener("click", () => {
   const open = $("taskRows").hidden;
@@ -697,45 +644,63 @@ function updateSettings(info) {
   $("dot").classList.toggle("on", on);
   $("statusLabel").textContent = on ? "Connected" : "Disconnected";
   $("statusDetail").textContent = on ? `Bridge on port ${info.port}`
-    : info.paired ? "Starting Mia Browser on this computer…" : "Run the Mia Browser installer once, and it starts by itself after that";
+    : info.paired ? "Starting Mia on this computer…" : setupDetail(info.helper);
+  renderSetup(info);
   if (document.activeElement !== $("port")) $("port").value = info.port;
   $("version").textContent = `Mia v${info.version}`;
   // Pairing is automatic; the manual fields only matter when it hasn't worked.
   $("setup").hidden = on;
   $("disconnectBtn").hidden = !on;
-  $("roomBox").hidden = !(on && info.room);
-  $("followMe").checked = Boolean(info.follow);
+  $("modesBox").hidden = !on;
   $("reelMode").checked = Boolean(info.reel);
   $("immersive").checked = Boolean(info.modes?.immersive);
   $("skipPrompt").checked = Boolean(info.modes?.skip);
   if (document.activeElement !== $("language")) $("language").value = info.language || "English";
-  if (info.room) {
-    const count = info.room.shared.length;
-    $("roomLabel").textContent = `In a room as ${info.room.me.name || info.room.me.id} · ${count} shared page${count === 1 ? "" : "s"}`;
-    const invites = $("roomInvites");
-    invites.replaceChildren();
-    const accepted = new Set(info.room.accepted || []);
-    for (const page of info.room.pages || []) {
-      if (!page?.url || accepted.has(page.url)) continue;
-      const row = el("div", { className: "room-invite" });
-      row.append(el("strong", { textContent: page.title || hostOf(page.origin) || "Shared site" }),
-                 el("small", { textContent: page.href || page.origin }));
-      const actions = el("div", { className: "room-invite-actions" });
-      for (const [label, mode] of [...(page.href ? [["Open page", "new"]] : []), ["Use current tab", "current"]]) {
-        const button = el("button", { type: "button", textContent: label });
-        button.addEventListener("click", () => setting({ type: "accept-shared-page", url: page.url, mode }, 500));
-        actions.append(button);
-      }
-      row.append(actions);
-      invites.append(row);
-    }
-    invites.hidden = !invites.childElementCount;
+  if (!on) setStatus(info.paired || info.helper === "ok" ? "Mia is not running. Close and reopen Chrome, or reload the extension on chrome://extensions"
+    : "Mia isn't set up on this Mac yet. One download finishes it (see above).", true);
+  else if ($("status").textContent.startsWith("Not connected") || $("status").textContent.startsWith("Mia isn't set up")) setStatus("");
+}
+
+function setupDetail(helper) {
+  if (helper === "outdated") return "An older Mia helper is installed; the current installer replaces it";
+  if (helper === "failed") return "The Mia helper didn't answer. Running the installer again fixes it";
+  return "Not set up on this Mac yet";
+}
+
+// The card for the one step the extension can't do itself: the installer.
+const SETUP_STEPS = {
+  mac: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install, then enter your Mac password when asked",
+        "Come back here. This panel turns green on its own"],
+  win: ["Open the download (bottom of Chrome, or your Downloads folder)", "Click Install. No administrator password is needed",
+        "Come back here. This panel turns green on its own"],
+  linux: ["Open the download (bottom of Chrome, or your Downloads folder)", "Your software installer opens; click Install and enter your password",
+          "Come back here. This panel turns green on its own"],
+};
+const SETUP_WHAT = {
+  mac: "The Mia helper (its own copy of Python and Mia's programs, in /Library/Application Support/Ghost), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and everything is removed by the uninstaller in that folder.",
+  win: "The Mia helper (its own copy of Python and Mia's programs, in your user folder under AppData\\Local\\Mia), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it, and Mia appears in Windows' Installed apps to uninstall.",
+  linux: "The Mia helper (its own copy of Python and Mia's programs, in /opt/mia-browser-use), and Claude Code from Anthropic if you don't have it. Mia answers with your own Claude account. Nothing runs until Chrome asks for it; remove it with your package manager (mia-browser-use).",
+};
+
+function renderSetup(info) {
+  const paired = Boolean(info.paired) || info.helper === "ok";
+  $("setupCard").hidden = paired;
+  $("downloadBtn").href = info.installer_url || "#";
+  $("downloadBtn").hidden = !info.installer_url;
+  $("setupUnsupported").hidden = Boolean(info.installer_url);
+  const os = SETUP_STEPS[info.os] ? info.os : "mac";
+  $("setupSteps").replaceChildren(...SETUP_STEPS[os].map(text => { const li = document.createElement("li"); li.textContent = text; return li; }));
+  $("setupWhat").textContent = SETUP_WHAT[os];
+  if (info.helper === "outdated") {
+    $("setupTitle").textContent = "Update the Mia helper on this Mac";
+    $("setupText").textContent = "This version of Mia needs a newer helper than the one installed. Download the current installer and run it; your chats and settings stay.";
+  } else if (info.helper === "failed") {
+    $("setupTitle").textContent = "The Mia helper isn't answering";
+    $("setupText").textContent = "Running the installer again puts a fresh copy in place. If it still fails, close and reopen Chrome.";
+  } else {
+    $("setupTitle").textContent = "One more step on this Mac";
+    $("setupText").textContent = "Mia runs on your computer, not in the cloud. Chrome extensions can't install programs, so there is one download: the Mia installer. Open it, click Install, and this panel connects by itself.";
   }
-  // Offer only what applies to this tab.
-  $("shareBtn").hidden = Boolean(info.tab_shared);
-  $("unshareBtn").hidden = !info.tab_shared;
-  if (!on) setStatus("Mia Browser is not running. Reload the extension on chrome://extensions or close and reopen Chrome", true);
-  else connectionRecovered();
 }
 
 function refreshSettings() {
@@ -746,31 +711,11 @@ function refreshSettings() {
 
 function setting(message, delay = 300) {
   $("error").textContent = "";
-  chrome.runtime.sendMessage(message, result => {
-    if ((message.type.endsWith("share-tab") || message.type === "accept-shared-page") && !result?.ok) {
-      $("error").textContent = result?.error || "Could not reach the room";
-    }
-    setTimeout(refreshSettings, delay);
-  });
+  chrome.runtime.sendMessage(message, () => setTimeout(refreshSettings, delay));
 }
 
 $("openSettings").addEventListener("click", () => toggleSettings($("settings").hidden));
 $("closeSettings").addEventListener("click", () => toggleSettings(false));
-$("shareBtn").addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url) return;
-  const shareLink = $("shareFullLink").checked;
-  if (shareLink && !confirm(`Share this full address with everyone in the room?\n\n${tab.url}\n\nIts path or search terms may contain private information.`)) return;
-  setting({ type: "share-tab", share_link: shareLink }, 500);
-});
-$("unshareBtn").addEventListener("click", () => setting({ type: "unshare-tab" }, 500));
-$("followMe").addEventListener("change", () => {
-  if ($("followMe").checked && !confirm("Follow mode shares each active site's name with the room. Page paths and search terms stay private. Continue?")) {
-    $("followMe").checked = false;
-    return;
-  }
-  setting({ type: "follow", on: $("followMe").checked }, 500);
-});
 $("reelMode").addEventListener("change", () => setting({ type: "reel", on: $("reelMode").checked }));
 for (const id of ["immersive", "skipPrompt"]) {
   $(id).addEventListener("change", () => setting({ type: "modes", immersive: $("immersive").checked, skip: $("skipPrompt").checked }));
@@ -788,18 +733,16 @@ $("connectBtn").addEventListener("click", () => {
     setTimeout(() => { refreshSettings(); if (connected) chat("sync"); }, 500);
   });
 });
-// The share button and the connection dot follow the tab and the bridge.
-chrome.tabs.onActivated.addListener(refreshSettings);
+// The connection dot follows the bridge.
 setInterval(refreshSettings, 5000);
 
 // -- start --------------------------------------------------------------------------------
 
 (async () => {
-  const stored = await chrome.storage.local.get(["chatPrefs", "roomNames", "playInputs"]);
+  const stored = await chrome.storage.local.get(["chatPrefs", "playInputs"]);
   for (const [id, values] of Object.entries(stored.playInputs || {})) {
     if (values && typeof values === "object") playInputs.set(id, values);
   }
-  roomNames = stored.roomNames && typeof stored.roomNames === "object" ? stored.roomNames : {};
   const saved = stored.chatPrefs || {};
   if (saved.model) prefs.model = String(saved.model);
   renderChips();

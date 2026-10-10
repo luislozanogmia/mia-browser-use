@@ -78,7 +78,7 @@ function constantTimeEqual(left, right) {
 // ---------------------------------------------------------------------------
 
 function getStatus() {
-  return { connected, paired: Boolean(token), port, version: chrome.runtime.getManifest().version };
+  return { connected, paired: Boolean(token), helper, installer_url: installerUrl(), os: platformOs, port, version: chrome.runtime.getManifest().version };
 }
 
 function setBadge(text, color) {
@@ -91,8 +91,30 @@ function setBadge(text, color) {
 // ---------------------------------------------------------------------------
 
 const NATIVE_HOST = "com.ghost.bridge";
+// Where the Mac installer lives. The extension can't install software itself (Chrome
+// doesn't allow it), so this is the one download a person makes; the installer puts the
+// helper in place and the extension connects by itself a few seconds later.
+const RELEASES = "https://github.com/luislozanogmia/mia-browser-use/releases/latest/download/";
+const INSTALLERS = { mac: "Mia-Browser-Use.pkg", win: "Mia-Browser-Use-Setup.exe", linux: "mia-browser-use.deb" };
+let platformOs = "mac";
+chrome.runtime.getPlatformInfo().then(info => { platformOs = info.os; }).catch(() => {});
+function installerUrl() {
+  return INSTALLERS[platformOs] ? RELEASES + INSTALLERS[platformOs] : "";
+}
+const SETUP_RETRY_DELAY = 5000;
 let pairing = null;
 let bridgeJustStarted = false;
+// What the last pairing attempt learned about the helper on this computer:
+// "unknown" (never asked), "ok", "missing" (installer never ran), "outdated" (an
+// older helper that doesn't know this extension), "failed" (it ran but didn't answer).
+let helper = "unknown";
+
+function classifyHelperError(message) {
+  const text = String(message || "").toLowerCase();
+  if (text.includes("not found")) return "missing";
+  if (text.includes("forbidden")) return "outdated";
+  return "failed";
+}
 
 // Ask the local Ghost install for the token (see native_host.py). It also
 // starts the bridge when it isn't running. Chrome only lets this extension
@@ -102,6 +124,7 @@ function pairAutomatically() {
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "pair" }, reply => {
         const ok = !chrome.runtime.lastError && reply?.ok && typeof reply.token === "string" && reply.token.length >= 32;
+        helper = ok ? "ok" : classifyHelperError(chrome.runtime.lastError?.message || reply?.error);
         bridgeJustStarted = Boolean(ok && reply.bridge === "started");
         if (ok && reply.token !== token) {
           token = reply.token;
@@ -120,7 +143,10 @@ function pairAutomatically() {
 async function connect() {
   if (!token && !(await pairAutomatically())) {
     setBadge("PAIR", "#f59e0b");
-    scheduleReconnect(); // try again once Ghost is installed
+    // Keep asking every few seconds: the person is probably running the installer
+    // right now, and the panel should turn green on its own when it finishes.
+    reconnectDelay = SETUP_RETRY_DELAY;
+    scheduleReconnect();
     return;
   }
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
@@ -183,8 +209,8 @@ async function connect() {
     }
     if (!connected) return;
     if (msg.type === "shared_pages") {
-      await setSharedPages(msg.pages, msg.me);
-      followActiveTab();
+      await setSharedPages(msg.urls);
+      shareOpenTabs();
       return;
     }
     if (!msg.id || !msg.command) return;
@@ -387,14 +413,6 @@ function lifecycleError(err, tabId) {
 }
 
 async function handleCommand(command, args) {
-  if (args?.expected_url && ["ghost_click", "ghost_fill", "ghost_key", "ghost_scroll", "ghost_navigate", "ghost_vacuum"].includes(command)) {
-    const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
-    if (!tab || tab.url !== args.expected_url) throw typedError("TAB_CHANGED", "The tab address changed after approval");
-  }
-  if (args?.room_only && (command === "ghost_show" || command === "ghost_suggestion")) {
-    const tab = await chrome.tabs.get(args.tab_id).catch(() => null);
-    if (!isAcceptedTab(tab)) throw typedError("ROOM_ACCESS_DENIED", "This tab is not accepted for the room");
-  }
   if (isActorCall(args)) {
     if (!ACTOR_RE.test(args.actor_id)) throw typedError("INVALID_ACTOR", "actor_id must be 1-64 of A-Z a-z 0-9 _ . : -");
     if (!TABLESS_COMMANDS.has(command) && !Number.isInteger(args.tab_id)) {
@@ -618,40 +636,108 @@ async function sheetColumns(link) {
   return { headers, values };
 }
 
+// The tab the person named, found by name in the open sheet: the link's gid often points at
+// whichever tab was open when the link was copied. Returns the gid of the named tab.
+async function sheetTabGid(tabId, id, linkGid, tabName) {
+  const want = String(tabName || "").trim();
+  if (!want) return linkGid;
+  await chrome.tabs.update(tabId, { url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${linkGid}` });
+  await waitForTabLoad(tabId, 20000);
+  let names = [], back = null;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await new Promise(r => setTimeout(r, 500));
+    const [run] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (want) => {
+        const tabs = [...document.querySelectorAll(".docs-sheet-tab")];
+        const nameOf = t => t.querySelector(".docs-sheet-tab-name")?.textContent?.trim() || "";
+        const names = tabs.map(nameOf).filter(Boolean);
+        if (!names.length) return { names, hidden: document.hidden };
+        const open = document.querySelector(".docs-sheet-active-tab");
+        const gid = /gid=(\d+)/.exec(location.hash)?.[1] || "";
+        if (open && nameOf(open).toLowerCase() === want.toLowerCase()) return { names, gid };
+        const target = tabs.find(t => nameOf(t).toLowerCase() === want.toLowerCase());
+        if (!target) return { names, missing: true };
+        // Sheets switches tabs on the mouse going down on the tab's name.
+        const el = target.querySelector(".docs-sheet-tab-name") || target;
+        for (const type of ["mousedown", "mouseup", "click"]) {
+          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+        }
+        return { names, switching: true, hidden: document.hidden };
+      },
+      args: [want],
+    });
+    const result = run?.result || {};
+    names = result.names || names;
+    if (result.gid) {
+      if (back && back.id !== tabId) chrome.tabs.update(back.id, { active: true }).catch(() => {});
+      return result.gid;
+    }
+    if (result.missing) {
+      throw new Error(`SHEET_NO_SUCH_TAB: the spreadsheet has no tab called “${want}”; its tabs are ${names.map(n => `“${n}”`).join(", ")}. Nothing was written.`);
+    }
+    if (attempt === 8 && result.hidden) {
+      // Sheets doesn't draw, or switch tabs, while hidden: show it briefly, then go back.
+      [back] = await chrome.tabs.query({ active: true, windowId: (await chrome.tabs.get(tabId)).windowId });
+      await chrome.tabs.update(tabId, { active: true });
+    }
+  }
+  throw new Error(`SHEET_NOT_READY: couldn't open the tab “${want}” (saw tabs ${names.map(n => `“${n}”`).join(", ") || "none"}); nothing was written`);
+}
+
 async function sheetAppend(args) {
   const match = SHEET_RE.exec(String(args.sheet || ""));
   if (!match) throw new Error("sheet must be a Google Sheets link (https://docs.google.com/spreadsheets/d/…)");
   const id = match[1];
-  const gid = /[#&?]gid=(\d+)/.exec(args.sheet)?.[1] || "0";
+  const linkGid = /[#&?]gid=(\d+)/.exec(args.sheet)?.[1] || "0";
   // One line per row: a tab or line break inside a value would spill into other cells.
   const values = (Array.isArray(args.row) ? args.row : []).slice(0, 26).map(v => String(v ?? "").replace(/[\t\r\n]+/g, " ").trim());
   if (!values.some(Boolean)) throw new Error("row has no values");
   const width = values.length;
-  const readDeadline = Date.now() + 120000;
-  const rows = await sheetRows(id, gid, readDeadline);
-  const key = args.unique ? sameKey(args.unique) : "";
-  const matches = key ? rows.map((r, i) => r.some(cell => cell && sameKey(cell) === key) ? i : -1).filter(i => i >= 0) : [];
-  if (args.require_existing === true) {
-    if (!args.unique) throw new Error("DUPLICATE_CHECK_HELD: an existing unique key is required");
-    if (matches.length !== 1) throw new Error("DUPLICATE_CHECK_HELD: expected exactly one existing keyed row; no write performed");
-    const at = matches[0];
-    if (rows[at].length !== values.length || rows[at].some((cell, i) => cell !== values[i])) {
-      throw new Error("DUPLICATE_CHECK_HELD: the existing row differs from the verified payload; no write performed");
-    }
-    const after = await sheetRows(id, gid, readDeadline);
-    if (JSON.stringify(after) !== JSON.stringify(rows)) throw new Error("DUPLICATE_CHECK_HELD: the destination changed during verification");
-    return { added: false, already: true, row: at + 1, existing: rows[at], row_count: rows.length, no_write: true };
-  }
-  if (args.unique) {
-    if (matches.length) return { added: false, already: true, row: matches[0] + 1 };
-  }
-  // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
-  let last = rows.length;
-  while (last > 0 && !rows[last - 1].slice(0, width).some(cell => cell.trim())) last--;
-  const target = last + 1;
-  const tabId = args.tab_id ?? (await chrome.tabs.create({ url: "about:blank", active: false })).id;
-  const own = args.tab_id === undefined;
+  let tabId = args.tab_id;
+  let own = false;
   try {
+    let gid = linkGid;
+    if (String(args.tab_name || "").trim()) {
+      if (tabId === undefined) {
+        tabId = (await chrome.tabs.create({ url: "about:blank", active: false })).id;
+        own = true;
+      }
+      gid = await sheetTabGid(tabId, id, linkGid, args.tab_name);
+    }
+    const readDeadline = Date.now() + 120000;
+    const rows = await sheetRows(id, gid, readDeadline);
+    const key = args.unique ? sameKey(args.unique) : "";
+    const matches = key ? rows.map((r, i) => r.some(cell => cell && sameKey(cell) === key) ? i : -1).filter(i => i >= 0) : [];
+    if (args.require_existing === true || args.unique) {
+      if (!args.unique) throw new Error("DUPLICATE_CHECK_HELD: an existing unique key is required");
+      if (matches.length > 1) throw new Error("DUPLICATE_CHECK_HELD: more than one row has this unique key; no write performed");
+      if (args.require_existing === true && matches.length !== 1) {
+        throw new Error("DUPLICATE_CHECK_HELD: expected exactly one existing keyed row; no write performed");
+      }
+      if (matches.length === 1) {
+        const at = matches[0];
+        if (rows[at].length !== values.length || rows[at].some((cell, i) => cell !== values[i])) {
+          throw new Error("DUPLICATE_CHECK_HELD: the existing row differs from the current payload; no write performed");
+        }
+        if (args.require_existing === true) {
+          const after = await sheetRows(id, gid, readDeadline);
+          if (JSON.stringify(after) !== JSON.stringify(rows)) {
+            throw new Error("DUPLICATE_CHECK_HELD: the destination changed during verification");
+          }
+        }
+        return { added: false, already: true, row: at + 1, existing: rows[at], row_count: rows.length,
+                 no_write: true };
+      }
+    }
+    // The row after the last one with anything in the row's columns (a gap higher up isn't the end).
+    let last = rows.length;
+    while (last > 0 && !rows[last - 1].slice(0, width).some(cell => cell.trim())) last--;
+    const target = last + 1;
+    if (tabId === undefined) {
+      tabId = (await chrome.tabs.create({ url: "about:blank", active: false })).id;
+      own = true;
+    }
     // The sheet with the cursor on the first cell of the new row.
     await chrome.tabs.update(tabId, { url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}&range=A${target}` });
     await waitForTabLoad(tabId, 20000);
@@ -691,7 +777,7 @@ async function sheetAppend(args) {
       const result = run?.result || {};
       seen = result.seen || seen;
       if (result.wrongTab) {
-        throw new Error(`SHEET_WRONG_TAB: the link opens the tab “${result.wrongTab}”, not “${args.tab_name}”; nothing was written. Copy the link while that tab is open.`);
+        throw new Error(`SHEET_WRONG_TAB: the sheet opened on the tab “${result.wrongTab}”, not “${args.tab_name}”; nothing was written`);
       }
       pasted = result.pasted || "";
     }
@@ -851,9 +937,11 @@ async function fetchPdf(args) {
 
 // A new id each time the extension is installed or reloaded. Pages keep the
 // scripts an older copy injected; the new scripts see the id change and replace them.
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(details => {
   buildId = Promise.resolve(String(Date.now()));
   chrome.storage.local.set({ build: String(Date.now()) });
+  // First install (from the store or unpacked): show the one remaining step.
+  if (details?.reason === "install") chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
 });
 let buildId = chrome.storage.local.get("build").then(data => data.build || "0");
 
@@ -1355,15 +1443,12 @@ async function drawSuggestion(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Room: which pages are shared, and where the local human is working on them
+// Shared pages: every open http(s) tab is shared with the local relay while it
+// is open (one bot per tab); it is unshared when its tab closes. The relay's
+// list is mirrored here so the page scripts only run where asking works.
 // ---------------------------------------------------------------------------
 
 let sharedPages = new Set();
-let sharedPageDetails = new Map();
-const acceptedSharedTabs = new Map(); // tab id -> {url: exact local URL, roomUrl: opaque page ID}
-const manuallyShared = new Map(); // tab id -> page key shared from the side panel
-const stoppedByHuman = new Set(); // unshared from the side panel, so following leaves them alone
-let roomMe = null;
 
 // Same rule as ghost_room.page_key: origin + path, no query or fragment.
 function pageKey(url) {
@@ -1376,39 +1461,9 @@ function pageKey(url) {
   }
 }
 
-function siteOrigin(url) {
-  try {
-    const u = new URL(url);
-    return ["http:", "https:"].includes(u.protocol) ? `${u.origin}/` : null;
-  } catch { return null; }
-}
-
-function newRoomPageUrl() {
-  return `https://room.invalid/p/${crypto.randomUUID().replaceAll("-", "")}`;
-}
-
 function isShared(url) {
   const key = pageKey(url);
-  return Boolean(key && [...acceptedSharedTabs.values()].some(entry =>
-    pageKey(entry.url) === key && sharedPages.has(entry.roomUrl)));
-}
-
-function isAcceptedTab(tab) {
-  const entry = tab && acceptedSharedTabs.get(tab.id);
-  const page = entry && sharedPageDetails.get(entry.roomUrl);
-  return Boolean(entry && page && entry.url === tab.url && siteOrigin(tab.url) === page.origin);
-}
-
-function setRoomAccess(tab, accepted, roomUrl = null) {
-  const key = pageKey(tab?.url);
-  if (!Number.isInteger(tab?.id)) return;
-  const previous = acceptedSharedTabs.get(tab.id);
-  if (accepted && key && typeof roomUrl === "string" && roomUrl.startsWith("https://room.invalid/p/")) {
-    acceptedSharedTabs.set(tab.id, { url: tab.url, roomUrl });
-  }
-  else acceptedSharedTabs.delete(tab.id);
-  toBridge({ type: "room_access", tab_id: tab.id, url: tab.url || "",
-             room_url: roomUrl || previous?.roomUrl, accepted: acceptedSharedTabs.has(tab.id) });
+  return Boolean(key && sharedPages.has(key));
 }
 
 async function tabMeta(tabId) {
@@ -1447,25 +1502,16 @@ async function untrackHuman(tabId) {
   }).catch(() => {});
 }
 
-async function setSharedPages(pages, me) {
+async function setSharedPages(urls) {
   const before = sharedPages;
-  sharedPageDetails = new Map((Array.isArray(pages) ? pages : [])
-    .filter(page => page && typeof page.url === "string" && page.url.startsWith("https://room.invalid/p/")
-      && pageKey(page.url) === page.url && siteOrigin(page.origin) === page.origin)
-    .map(page => [page.url, page]));
-  sharedPages = new Set(sharedPageDetails.keys());
-  roomMe = me && typeof me === "object" ? me : null;
+  sharedPages = new Set(Array.isArray(urls) ? urls : []);
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    const entry = acceptedSharedTabs.get(tab.id);
-    if (entry && (!sharedPages.has(entry.roomUrl) || entry.url !== tab.url)) {
-      setRoomAccess(tab, false);
-    }
-    if (entry && before.has(entry.roomUrl) && !sharedPages.has(entry.roomUrl)) {
+    const key = pageKey(tab.url);
+    if (key && before.has(key) && !sharedPages.has(key)) {
       // No longer shared: clean the page.
       await untrackHuman(tab.id);
-    } else if (isAcceptedTab(tab)) {
-      setRoomAccess(tab, true, entry.roomUrl); // restore bridge consent after a reconnect
+    } else if (isShared(tab.url)) {
       await trackHuman(tab.id);
       ws?.send(JSON.stringify({ type: "tab_ready", tab_id: tab.id, url: tab.url }));
     }
@@ -1473,78 +1519,44 @@ async function setSharedPages(pages, me) {
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
-  if (!connected || !ws) return;
-  if (acceptedSharedTabs.has(tabId) && acceptedSharedTabs.get(tabId).url !== tab.url) setRoomAccess(tab, false);
-  if (info.status !== "complete") return;
-  if (isAcceptedTab(tab)) {
-    ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
-    await trackHuman(tabId);
-  }
+  if (info.status !== "complete" || !connected || !ws) return;
+  ws.send(JSON.stringify({ type: "tab_ready", tab_id: tabId, url: tab.url }));
+  shareTab(tab);
+  if (isShared(tab.url)) await trackHuman(tabId);
 });
 
 // ---------------------------------------------------------------------------
-// Follow me: keep the tab the human is looking at shared with the room
+// Automatic sharing: the page in each open tab, for as long as the tab is open
 // ---------------------------------------------------------------------------
 
-let following = false;
-let followedUrl = null; // shared by following, so following may unshare it
-let followedTabId = null;
-let followedRoomUrl = null;
+const tabPages = new Map(); // tab id -> page key it currently shares
 
-async function leaveFollowedTab() {
-  const keptByOwner = manuallyShared.get(followedTabId) === followedUrl;
-  if (followedRoomUrl && !keptByOwner) {
-    toBridge({ type: "unshare", url: followedRoomUrl });
-  }
-  if (Number.isInteger(followedTabId)) {
-    const tab = await chrome.tabs.get(followedTabId).catch(() => null);
-    if (tab && !keptByOwner) {
-      setRoomAccess(tab, false);
-      await untrackHuman(followedTabId);
-    }
-  }
-  followedUrl = null;
-  followedTabId = null;
-  followedRoomUrl = null;
+function shareTab(tab) {
+  if (!tab || !Number.isInteger(tab.id)) return;
+  const key = pageKey(tab.url);
+  const before = tabPages.get(tab.id);
+  if (before && before !== key) leavePage(tab.id, before);
+  if (!key) return;
+  tabPages.set(tab.id, key);
+  if (!sharedPages.has(key)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, title: tab.title });
 }
 
-async function followActiveTab() {
-  if (!following || !connected) return;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const key = tab && pageKey(tab.url);
-  if (!key || (key === followedUrl && tab.id === followedTabId
-      && acceptedSharedTabs.get(tab.id)?.url === tab.url
-      && acceptedSharedTabs.get(tab.id)?.roomUrl === followedRoomUrl)) return;
-  if (stoppedByHuman.has(key)) {
-    // The human stopped sharing this page; following doesn't share it again.
-    await leaveFollowedTab();
-    return;
-  }
-  // Leave the last followed page, unless the human shared it themselves.
-  if (followedTabId !== tab.id || followedUrl !== key) await leaveFollowedTab();
-  const accepted = acceptedSharedTabs.get(tab.id);
-  if (isAcceptedTab(tab) && sharedPageDetails.get(accepted.roomUrl)?.by !== roomMe?.id) return;
-  followedUrl = key;
-  followedTabId = tab.id;
-  followedRoomUrl = manuallyShared.get(tab.id) === key ? accepted?.roomUrl : newRoomPageUrl();
-  if (!followedRoomUrl) followedRoomUrl = newRoomPageUrl();
-  setRoomAccess(tab, true, followedRoomUrl);
-  if (!sharedPages.has(followedRoomUrl)) toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: followedRoomUrl });
+// A tab left a page (closed or moved on): unshare it unless another tab still shows it.
+function leavePage(tabId, key) {
+  tabPages.delete(tabId);
+  for (const other of tabPages.values()) if (other === key) return;
+  toBridge({ type: "unshare", url: key });
 }
 
-async function setFollow(on) {
-  following = on;
-  await chrome.storage.local.set({ follow: on });
-  if (on) {
-    followActiveTab();
-  } else {
-    await leaveFollowedTab();
-  }
+async function shareOpenTabs() {
+  if (!connected) return;
+  for (const tab of await chrome.tabs.query({})) shareTab(tab);
 }
 
-chrome.tabs.onActivated.addListener(() => followActiveTab());
-chrome.windows.onFocusChanged.addListener(id => { if (id !== chrome.windows.WINDOW_ID_NONE) followActiveTab(); });
-chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active) followActiveTab(); });
+chrome.tabs.onRemoved.addListener(tabId => {
+  const key = tabPages.get(tabId);
+  if (key) leavePage(tabId, key);
+});
 
 // ---------------------------------------------------------------------------
 // Reel mode: a screenshot of every shared page the human visits and of every
@@ -1556,17 +1568,15 @@ let lastShot = 0;
 const lastPageShot = new Map(); // page -> time, so reloads don't repeat it
 
 async function reelCapture(tab, extra) {
-  if (!reelOn || !tab?.active || !isAcceptedTab(tab)) return;
+  if (!reelOn || !tab?.active || !isShared(tab.url)) return;
   // Chrome allows about two captures a second.
   const wait = lastShot + 600 - Date.now();
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
   lastShot = Date.now();
   try {
     const fresh = await chrome.tabs.get(tab.id);
-    if (!fresh.active || fresh.url !== tab.url || !isAcceptedTab(fresh)) return;
+    if (!fresh.active || pageKey(fresh.url) !== pageKey(tab.url)) return; // the human moved on
     const image = await chrome.tabs.captureVisibleTab(fresh.windowId, { format: "jpeg", quality: 70 });
-    const after = await chrome.tabs.get(tab.id);
-    if (after.url !== fresh.url || !isAcceptedTab(after)) return;
     await reelAdd({ ts: Date.now(), url: fresh.url, title: fresh.title || "", image, ...extra });
     chrome.runtime.sendMessage({ type: "reel-added" }).catch(() => {});
   } catch {}
@@ -1591,11 +1601,7 @@ async function saveConversation(tab, conversation) {
   chrome.storage.session.set({ closedThreads: [...closedThreads].slice(-500) }).catch(() => {});
   let image = null;
   try {
-    if (tab.active && isAcceptedTab(tab)) {
-      image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
-      const after = await chrome.tabs.get(tab.id);
-      if (after.url !== tab.url || !isAcceptedTab(after)) image = null;
-    }
+    if (tab.active) image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
   } catch {}
   const turns = (Array.isArray(conversation.turns) ? conversation.turns : []).slice(0, 100).map(t => ({
     q: String(t?.q || "").slice(0, 600), by: String(t?.by || "").slice(0, 80),
@@ -1607,16 +1613,16 @@ async function saveConversation(tab, conversation) {
 
 function reelPage(tab) {
   const key = pageKey(tab.url);
-  if (!reelOn || !isAcceptedTab(tab) || !key || Date.now() - (lastPageShot.get(key) || 0) < 30000) return;
+  if (!reelOn || !key || Date.now() - (lastPageShot.get(key) || 0) < 30000) return;
   lastPageShot.set(key, Date.now());
   // Give the page a moment to draw.
   setTimeout(() => reelCapture(tab, { kind: "page" }), 1500);
 }
 
-chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active && isAcceptedTab(tab)) reelPage(tab); });
+chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === "complete" && tab.active && isShared(tab.url)) reelPage(tab); });
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab && tab.status === "complete" && isAcceptedTab(tab)) reelPage(tab);
+  if (tab && tab.status === "complete" && isShared(tab.url)) reelPage(tab);
 });
 
 // ---------------------------------------------------------------------------
@@ -1628,14 +1634,7 @@ function toBridge(message) {
 }
 
 // A closed tab takes its bot off Mia's list, whether or not the panel is open.
-chrome.tabs.onRemoved.addListener(tabId => {
-  if (acceptedSharedTabs.has(tabId)) {
-    toBridge({ type: "room_access", tab_id: tabId, url: acceptedSharedTabs.get(tabId).url,
-               room_url: acceptedSharedTabs.get(tabId).roomUrl, accepted: false });
-    acceptedSharedTabs.delete(tabId);
-  }
-  toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } });
-});
+chrome.tabs.onRemoved.addListener(tabId => toBridge({ type: "chat", chat: { action: "tab_closed", tab: tabId } }));
 
 // ---------------------------------------------------------------------------
 // Mia's chat: the side panel talks to the bridge through here
@@ -1698,7 +1697,7 @@ async function chatFromPanel(msg) {
       // The panel has no Ask/Do switch: Mia decides. A mode sent explicitly still binds her.
       text: String(msg.text || "").slice(0, 2000), mode: ["ask", "do"].includes(msg.mode) ? msg.mode : "auto",
       run: msg.run === "queue" ? "queue" : "parallel", model: String(msg.model || "").slice(0, 60),
-      tab: await chatTab(), language, owner_color: roomMe?.color || "",
+      tab: await chatTab(), language,
     });
   }
   toBridge({ type: "chat", chat });
@@ -1723,7 +1722,7 @@ chrome.commands?.onCommand.addListener(async (command, tab) => {
       target: { tabId: tab.id },
       func: (mode, ok) => {
         const overlay = globalThis.__ghostOverlay;
-        if (!ok) return overlay?.toast?.("Share this page with the room to ask about it");
+        if (!ok) return overlay?.toast?.("Mia can't ask about this page yet. Reload it and try again");
         if (mode === "crop-ask") overlay?.startCrop();
         else overlay?.askSelection();
       },
@@ -1737,11 +1736,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "get-status") {
-    Promise.all([chrome.tabs.query({ active: true, currentWindow: true }), chrome.tabs.query({})]).then(([[tab], tabs]) => {
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       sendResponse({
-        ...getStatus(), developmentReload: developmentReload.status(), follow: following, reel: reelOn, modes, language, tab_shared: Boolean(tab && isAcceptedTab(tab)),
-        room: roomMe ? { me: roomMe, shared: [...sharedPages], pages: [...sharedPageDetails.values()],
-                         accepted: tabs.filter(isAcceptedTab).map(tab => acceptedSharedTabs.get(tab.id).roomUrl) } : null,
+        ...getStatus(), developmentReload: developmentReload.status(), reel: reelOn, modes, language,
+        tab_shared: Boolean(tab && isShared(tab.url)),
       });
     });
     return true;
@@ -1751,18 +1749,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sheetColumns(String(msg.sheet || "")).then(sendResponse, error => sendResponse({ error: String(error?.message || error) }));
     return true;
   }
-  // From the human tracker in a shared page.
-  if (msg.type === "human_presence" && sender.tab && isAcceptedTab(sender.tab)) {
-    toBridge({ type: "human", tab_id: sender.tab.id, url: sender.tab.url, status: msg.status, focus: msg.focus, pointer: msg.pointer });
-    return false;
-  }
   // A human clicked Accept or Reject on a suggestion card.
   if (msg.type === "resolve" && sender.tab && typeof msg.id === "string") {
     toBridge({ type: "resolve", id: msg.id, decision: msg.decision });
     return false;
   }
   // A human selected text on a shared page and asked the bots about it.
-  if (msg.type === "ask" && sender.tab && isAcceptedTab(sender.tab) && typeof msg.question === "string") {
+  if (msg.type === "ask" && sender.tab && isShared(sender.tab.url) && typeof msg.question === "string") {
     const image = typeof msg.image === "string" && msg.image.startsWith("data:image/jpeg;base64,") && msg.image.length <= MAX_CROP_CHARS
       ? msg.image : null;
     toBridge({
@@ -1780,7 +1773,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   // The human cropped an area of a shared page: take its picture.
-  if (msg.type === "capture" && sender.tab && isAcceptedTab(sender.tab) && msg.rect) {
+  if (msg.type === "capture" && sender.tab && isShared(sender.tab.url) && msg.rect) {
     cropVisible(sender.tab, msg.rect).then(image => sendResponse({ image }), () => sendResponse({ image: null }));
     return true;
   }
@@ -1807,7 +1800,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "chat-last" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
-    sendResponse({ state: chatState, connected: Boolean(connected), room: roomMe ? { me: roomMe } : null });
+    sendResponse({ state: chatState, connected: Boolean(connected) });
     return false;
   }
   // The reel page wants the words for its PDF: the bridge asks a model.
@@ -1823,7 +1816,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "reel") {
     reelOn = Boolean(msg.on);
     chrome.storage.local.set({ reel: reelOn }).then(() => sendResponse({ ok: true }));
-    if (reelOn) chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => tab && isAcceptedTab(tab) && reelPage(tab));
+    if (reelOn) chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => tab && isShared(tab.url) && reelPage(tab));
     return true;
   }
   if (msg.type === "open-reel") {
@@ -1832,67 +1825,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ? chrome.tabs.update(open.id, { active: true }).then(() => chrome.windows.update(open.windowId, { focused: true }))
       : chrome.tabs.create({ url })));
     return false;
-  }
-  // From the side panel: share the tab the human is on, wherever they go.
-  if (msg.type === "follow") {
-    setFollow(Boolean(msg.on)).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  // From the side panel: share or stop sharing the current tab with the room.
-  if (msg.type === "share-tab" || msg.type === "unshare-tab") {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (!tab || !pageKey(tab.url)) return sendResponse({ ok: false, error: "Only http(s) pages can be shared" });
-      const key = pageKey(tab.url);
-      if (msg.type === "share-tab") {
-        const roomUrl = newRoomPageUrl();
-        toBridge({ type: "share", tab_id: tab.id, url: tab.url, room_url: roomUrl,
-                   share_link: msg.share_link === true });
-        manuallyShared.set(tab.id, key);
-        stoppedByHuman.delete(key);
-        setRoomAccess(tab, true, roomUrl);
-      } else {
-        const entry = acceptedSharedTabs.get(tab.id);
-        if (entry && sharedPageDetails.get(entry.roomUrl)?.by === roomMe?.id) {
-          toBridge({ type: "unshare", tab_id: tab.id, url: entry.roomUrl });
-        }
-        manuallyShared.delete(tab.id);
-        stoppedByHuman.add(key);
-        if (followedUrl === key && followedTabId === tab.id) {
-          followedUrl = null; followedTabId = null; followedRoomUrl = null;
-        }
-        setRoomAccess(tab, false);
-      }
-      sendResponse({ ok: true });
-    });
-    return true;
-  }
-  if (msg.type === "accept-shared-page" && sender.url?.startsWith(chrome.runtime.getURL("sidepanel.html"))) {
-    (async () => {
-      const key = msg.url;
-      const page = sharedPageDetails.get(key);
-      if (typeof key !== "string" || !page || !sharedPages.has(key)) {
-        return { ok: false, error: "That page is no longer shared" };
-      }
-      let tab;
-      if (msg.mode === "current") {
-        [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab) return { ok: false, error: "There is no current tab" };
-        if (siteOrigin(tab.url) !== page.origin) return { ok: false, error: `Open a page on ${page.origin} first` };
-      } else if (msg.mode === "new" && page.href) {
-        tab = await chrome.tabs.create({ url: page.href, active: true });
-      } else {
-        return { ok: false, error: "The sharer did not provide a full link; use a tab already on this site" };
-      }
-      let loaded = await chrome.tabs.get(tab.id);
-      if (loaded.status !== "complete") await waitForTabLoad(tab.id, 15000);
-      loaded = await chrome.tabs.get(tab.id);
-      if (siteOrigin(loaded.url) !== page.origin) return { ok: false, error: "The tab is on a different site" };
-      setRoomAccess(loaded, true, key);
-      await trackHuman(tab.id);
-      toBridge({ type: "tab_ready", tab_id: tab.id, url: loaded.url });
-      return { ok: true };
-    })().then(sendResponse, err => sendResponse({ ok: false, error: err?.message || String(err) }));
-    return true;
   }
   if (msg.type === "connect") {
     port = msg.port || DEFAULT_PORT;
@@ -1928,9 +1860,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Startup
 // ---------------------------------------------------------------------------
 
-chrome.storage.local.get(["port", "token", "follow", "reel", "modes", "language"], (data) => {
+chrome.storage.local.get(["port", "token", "reel", "modes", "language"], (data) => {
   language = cleanLanguage(data.language);
-  following = Boolean(data.follow);
   if (data.modes) modes = { immersive: Boolean(data.modes.immersive), skip: Boolean(data.modes.skip) };
   reelOn = Boolean(data.reel);
   if (data.port) port = data.port;

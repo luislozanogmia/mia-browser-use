@@ -157,6 +157,7 @@ def test_play_replays_steps_in_its_own_tab_with_copied_values(tmp_path):
             ("ghost_fill", {"choice": 1, "value": "total 42 open items", "tab_id": 91, "actor_id": task.agent.id,
                             "human_ok": True, "expected_url": ""}),
             ("ghost_click", {"selector": "#export", "tab_id": 91, "actor_id": task.agent.id, "human_ok": True, "expected_url": ""}),
+            ("ghost_tab_list", {}),
         ]
         assert hub.scripts.get(item["id"])["last_run"]["status"] == "done"
         assert hub.messages[-1]["text"].startswith("▶ Daily report · Done.")

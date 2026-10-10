@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mia privacy policy</title>
+<style>body{max-width:680px;margin:48px auto;padding:0 20px;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#1F1E1B}h1{font-size:28px}h2{font-size:19px;margin-top:28px}</style>
+</head><body>
+<h1>Mia privacy policy</h1>
+<p><em>Mia Labs · last updated October 7, 2026</em></p>
+
+<p>Mia is a browser assistant for Google Chrome, made by Mia Labs. This page says what Mia does with your data. The short version: Mia runs on your computer, there is no Mia server, and your pages and questions go only to Anthropic through your own Claude account.</p>
+
+<h2>What Mia is made of</h2>
+<p>Mia has two parts. The Chrome extension, which you add from the Chrome Web Store, and the Mia helper, a program you install once on your Mac. The extension and the helper talk to each other on your computer only (address 127.0.0.1). The helper uses Claude Code, Anthropic's command-line tool, signed in to your own Claude account.</p>
+
+<h2>What Mia collects</h2>
+<p>Mia collects nothing on its own. It has no account system, no analytics, no crash reporting and no server of its own. Mia Labs receives no data from you when you use Mia.</p>
+
+<h2>What leaves your computer</h2>
+<p>When you ask Mia about a page, or ask her to do something on it, the text and images you point at, your question, and the page details needed for the job are sent to Anthropic's Claude through your own Claude account, so that Claude can answer or plan the job. That is the only place data goes, and only when you ask. Anthropic handles it under <a href="https://www.anthropic.com/legal/privacy">Anthropic's privacy policy</a> and the terms of your Claude plan. Mia Labs does not see it.</p>
+<p>When you ask Mia to act on a site (fill a form, post, send), the data goes to that site, exactly as if you had done it yourself. Mia asks you first before anything that sends, posts, buys, deletes, or opens another site with data from the page.</p>
+
+<h2>What stays on your computer</h2>
+<ul>
+<li>Your settings, chat history and saved automations, in Chrome's extension storage and in the folder <code>~/.ghost</code>.</li>
+<li>The Reel: screenshots Mia keeps only if you turn Reel mode on. They stay in your browser until you delete them.</li>
+<li>A log of what the helper did (<code>~/.ghost/bridge.log</code>), for fixing problems. It never leaves your Mac.</li>
+</ul>
+
+<h2>Permissions</h2>
+<p>Mia asks Chrome for access to your tabs and to all sites because you can ask about any page. Scripts run only in a tab you asked about, to draw the question and answer on the page and to do what you asked. Native messaging is how the extension reaches the helper on your Mac.</p>
+
+<h2>Removing Mia</h2>
+<p>Remove the extension from <code>chrome://extensions</code>. Run <code>uninstall.sh</code> in <code>/Library/Application Support/Ghost</code> to remove the helper. Delete <code>~/.ghost</code> to remove your local history and settings. Claude Code, if the installer added it, is Anthropic's software and is removed separately.</p>
+
+<h2>Children</h2>
+<p>Mia is not directed at children under 13 and does not knowingly collect data from them (it collects none from anyone).</p>
+
+<h2>Changes and contact</h2>
+<p>If this policy changes, the new version appears here with a new date, and the extension's store listing links to it. Questions: <a href="mailto:luis@mia-labs.com">luis@mia-labs.com</a>.</p>
+</body></html>

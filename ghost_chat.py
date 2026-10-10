@@ -17,7 +17,6 @@ import asyncio
 import itertools
 import hashlib
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -62,8 +61,6 @@ TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_click", "ghost_f
             "ghost_scroll", "ghost_wait", "use_automation"}
 BUILD_TOOLS = TOOLS | {"test_automation", "build_plan", "invalidate_build", "reconcile_build", "ghost_records"}
 MAX_BUILD_FIXES = 3  # times a builder is sent back when what it wants to save can't be saved or wasn't tested
-ASK_TOOLS = {"ghost_read", "ghost_vacuum", "ghost_navigate", "ghost_scroll", "ghost_wait", "use_automation"}
-ORDINARY_URL_PARAMS = {"q", "query", "search", "term", "page", "start", "offset", "sort", "filter", "view", "tab", "gid", "lang", "language"}
 # Words on a control that mean pressing it changes something for someone else.
 RISKY = re.compile(
     r"\b(send|submit|post|publish|tweet|reply|comment|share|buy|purchase|order|pay|checkout|check out|donate|"
@@ -254,6 +251,14 @@ def _text(value: Any, limit: int) -> str:
     return " ".join(str(value).split())[:limit] if isinstance(value, (str, int, float)) else ""
 
 
+def _lines(value: Any, limit: int) -> str:
+    """An answer for a card: line breaks stay (bullets and paragraphs), runs of spaces don't."""
+    if not isinstance(value, (str, int, float)):
+        return ""
+    lines = [" ".join(line.split()) for line in str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:limit]
+
+
 def _typed(value: Any) -> str:
     """What the person wrote for a box, exactly: line breaks and blank lines stay (a message's format)."""
     if not isinstance(value, (str, int, float)):
@@ -269,19 +274,11 @@ def _why(exc: BaseException) -> str:
 
 
 def external_url_needs_approval(url: str, page_hosts: set[str], page_text: str) -> bool:
-    """A model-chosen address needs a human check: encoded data evades text matching."""
+    """A model-chosen address needs a human check; encoded data evades text matching."""
     return bool(url)
 
 
 SEARCH_FIELD = re.compile(r"\b(search|find|filter|look ?up|buscar|busca|rechercher|suche)\b", re.I)
-
-
-def _lines(value: Any, limit: int) -> str:
-    """Like _text, but keeps line breaks: lists Mia writes stay one item per line."""
-    if not isinstance(value, str):
-        return ""
-    lines = [" ".join(line.split()) for line in value.strip().splitlines()]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))[:limit]
 
 
 def parse_json(raw: str) -> dict:
@@ -507,8 +504,7 @@ class ClaudeSession:
     """One Claude process kept open for a conversation, run from an empty folder with no tools."""
 
     def __init__(self, model: str, system: str, effort: str = MIA_EFFORT, binary: str = "claude"):
-        self.model, self.system, self.effort = model, system, effort
-        self.binary = claude_setup.binary() if binary == "claude" else binary
+        self.model, self.system, self.effort, self.binary = model, system, effort, binary
         self.timeout = TURN_TIMEOUT  # seconds of silence before a turn fails; None waits for the model
         self.proc = None
         self.folder = None
@@ -516,15 +512,14 @@ class ClaudeSession:
     async def turn(self, text: str) -> str:
         if self.proc is None:
             self.folder = tempfile.TemporaryDirectory()
-            if not self.binary or not shutil.which(self.binary):
+            if not shutil.which(self.binary):
                 raise RuntimeError(NO_MODEL)
             self.proc = await asyncio.create_subprocess_exec(
                 self.binary, "-p", "--model", self.model, "--effort", self.effort, "--tools", "", "--strict-mcp-config",
                 "--no-session-persistence", "--system-prompt", self.system,
                 "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.folder.name, limit=8 * 1024 * 1024,
-                env={**os.environ, "DISABLE_AUTOUPDATER": "1"})
+                cwd=self.folder.name, limit=8 * 1024 * 1024)
         message = {"type": "user", "message": {"role": "user", "content": text}}
         self.proc.stdin.write((json.dumps(message) + "\n").encode())
         await self.proc.stdin.drain()
@@ -577,9 +572,9 @@ class Agent:
     """One agent per tab. It holds every task on that tab (selections, crops, Ask and
     Do from the chat) and does them one at a time, with one mote on the page."""
 
-    def __init__(self, n: int, tab_id: int | None, prefix: str = ""):
+    def __init__(self, n: int, tab_id: int | None):
         self.n = n
-        self.id = f"{prefix}-mia-{n}"[-64:] if prefix else f"mia-{n}"
+        self.id = f"mia-{n}"
         self.name = f"Bot {n}"  # named after its site once it has one (ChatHub.name_agent)
         self.color = COLORS[(n - 1) % len(COLORS)]
         self.tab_id = tab_id
@@ -690,7 +685,7 @@ class ChatHub:
                  push: Callable[[dict], Awaitable[None]], room: Callable[[], dict | None] = lambda: None,
                  session: Callable[[str, str, str], Any] = ClaudeSession,
                  plan: Callable[[str, str], Awaitable[str]] | None = None,
-                 me: Callable[[], str] = lambda: "", make_bot: Callable[[Agent], Any] | None = None,
+                 make_bot: Callable[[Agent], Any] | None = None,
                  retire: Callable[[str], Awaitable[None]] | None = None,
                  store: chat_store.ChatStore | None = None,
                  scripts: automations.AutomationStore | None = None):
@@ -699,7 +694,6 @@ class ChatHub:
         self.scheduler: asyncio.Task | None = None
         self.call, self.push, self.room, self.session = call, push, room, session
         self.retire = retire  # a dropped bot leaves the room too
-        self.me = me  # the person's room id: agent ids must be unique in the room
         self.make_bot = make_bot or self._make_bot
         self.agents: dict[str, Agent] = {}
         self.agent_counter = itertools.count(1)
@@ -710,7 +704,6 @@ class ChatHub:
         self.ids = itertools.count(1)
         self.slots = asyncio.Semaphore(MAX_PARALLEL)
         self.queue_lock = asyncio.Lock()
-        self.owner_color = ""
         self.planning = 0
         self.claude_status = claude_setup.status
         self.claude: dict = {}
@@ -934,8 +927,6 @@ class ChatHub:
             context += ("\nThe person invoked /goal: own this automation build as a persistent goal. "
                         "Plan one build task; decompose and test incrementally, and continue until the "
                         "whole goal is verified or the person stops it. Do not substitute a partial automation.")
-        if isinstance(msg.get("owner_color"), str) and re.fullmatch(r"#[0-9a-fA-F]{3,8}", msg["owner_color"]):
-            self.owner_color = msg["owner_color"]
         self.say("you", text)
         print(f"[chat] ({run}, {model}) on tab {tab_id}: {text[:80]}")
         with suppress(Exception):
@@ -1018,7 +1009,6 @@ class ChatHub:
                 target, where = None, None
             task = self.add(Task(next(self.counter), t["title"], t["goal"], url, t["kind"], run, model,
                                  self.agent_for(target, where["url"] if where else tab.get("url"))))
-            task.current_url = url or str(where["url"] if where else tab.get("url") or "")
             if where:
                 task.where = f"the person's tab “{_text(where['title'], 80)}” ({_text(where['url'], 200)})"
             task.needs = [tasks[n] for n in t["needs"]]
@@ -1026,6 +1016,8 @@ class ChatHub:
             task.done_when = t["done_when"]
             if t["build"]:
                 task.build = t["build"]
+            # The page the task starts on: a Play Automation built from it opens there.
+            task.current_url = url or str(where["url"] if where else tab.get("url") or "")
             if _host(tab.get("url")):
                 task.page_hosts.add(_host(tab.get("url")))
             tasks.append(task)
@@ -1128,7 +1120,7 @@ class ChatHub:
             for agent in self.agents.values():
                 if agent.tab_id == tab_id:
                     return agent
-        agent = Agent(next(self.agent_counter), tab_id, re.sub(r"[^A-Za-z0-9_.:-]", "", self.me() or "")[:40])
+        agent = Agent(next(self.agent_counter), tab_id)
         agent.host = _host(url)
         self.name_agent(agent)
         self.agents[agent.id] = agent
@@ -1271,7 +1263,7 @@ class ChatHub:
                 raise RuntimeError(str(value))
             return value
 
-        return AskBot(agent.id, claude_answer(BOT_MODEL, can_act=True, effort=BOT_EFFORT, room_only=True), call=call, label=agent.name, color=agent.color,
+        return AskBot(agent.id, claude_answer(BOT_MODEL, can_act=True, effort=BOT_EFFORT), call=call, label=agent.name, color=agent.color,
                       report=claude_report(BOT_MODEL, effort=BOT_EFFORT))
 
     def context(self, tab: dict, language: Any, tab_id: int | None = None, open_tabs: list[dict] | None = None) -> str:
@@ -1393,7 +1385,7 @@ class ChatHub:
                 if re.match(r"^https?://", task.current_url or ""):
                     task.trace = [{"do": "open", "url": task.current_url}]
                 await self.show(task, "working")
-                allowed = ASK_TOOLS if task.kind == "ask" else BUILD_TOOLS if task.build else TOOLS
+                allowed = BUILD_TOOLS if task.build else TOOLS
                 if task.build:
                     task.build_journal = task.build_journal or BuildJournal(request=task.request or task.goal)
                     task.build_journal.save_checkpoint({**task.build_journal.state["checkpoint"],
@@ -1549,22 +1541,25 @@ class ChatHub:
         body = (f"{waiting} Approve or reject it in Mia's side panel." if waiting else task.result)
         try:
             await self.call("ghost_suggest", {"actor_id": task.agent.id, "tab_id": task.tab_id, "id": f"re-{task.answers}"[:64],
-                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _text(body, 600)})
+                                              "reply_to": task.answers, "kind": "note", "title": title, "body": _lines(body, 600)})
         except Exception as exc:
             print(f"[chat] couldn't update the card for {task.id}: {exc}")
 
     def args(self, task: Task, args: dict) -> dict:
         """Bind a worker call to its tab and actor; only an explicit grant overrides the viewing guard."""
-        args = {k: v for k, v in args.items() if k not in {"tab_id", "actor_id", "human_ok", "expected_url", "script", "password"}}
+        args = {k: v for k, v in args.items()
+                if k not in {"tab_id", "actor_id", "human_ok", "expected_url", "script", "password"}}
         return {**args, "tab_id": task.tab_id, "actor_id": task.agent.id,
-                "human_ok": task.control_approved, "expected_url": task.control_url if task.control_approved else ""}
+                "human_ok": task.control_approved,
+                "expected_url": task.control_url if task.control_approved else ""}
 
     def others_here(self) -> bool:
-        """Other people are in the room (multiplayer), not just this person and their bots."""
+        """Other people are in the room, rather than this person and local bots."""
         room = self.room() or {}
         return bool(room.get("others"))
 
     async def wait_for_approval(self, task: Task, question: str, choice: Any = None) -> bool:
+        """Ask the person on the page and in the panel; True when they approve."""
         task.status, task.question = "needs_you", question
         task.approval = asyncio.get_running_loop().create_future()
         if task.tab_id is not None:
@@ -1661,10 +1656,6 @@ class ChatHub:
         except Exception as exc:
             ok, value = False, str(exc)
         if not ok:
-            if "TAB_CHANGED" in str(value):
-                task.control_approved = False
-                task.control_url = ""
-                task.current_url = ""
             return f"Error from {tool}: {_text(value, 400)}"
         recorded = len(task.trace)
         self.record(task, tool, args, value)
@@ -1672,24 +1663,16 @@ class ChatHub:
             # A builder sees what it just did as a script step: the text and css Play would look for.
             return page_block(tool, value) + f"\nAs a script step: {json.dumps(task.trace[-1], ensure_ascii=False)}"
         if tool in {"ghost_read", "ghost_vacuum"} and isinstance(value, dict):
-            if isinstance(value.get("url"), str):
-                task.current_url = value["url"]
             task.elements = {int(n): line for n, line in ELEMENT_LINE.findall(str(value.get("content") or ""))}
-            if value.get("content") and _host(value.get("url")):
-                task.page_hosts.add(_host(value.get("url")))
-                task.page_text = (task.page_text + "\n" + str(value["content"]))[-32000:]
+            if isinstance(value.get("url"), str) and value["url"]:
+                task.current_url = value["url"]
         elif tool in {"ghost_navigate", "ghost_click", "ghost_key"}:
             task.elements = {} if tool == "ghost_navigate" else task.elements
-            if tool == "ghost_navigate":
-                task.control_approved = False
-                task.control_url = ""
         return page_block(tool, value)
 
     async def move_to_own_tab(self, task: Task, url: str) -> None:
         """Going to another page leaves the person's tab alone: the worker gets a new tab, and agent."""
         await self.show(task, None, clear=True)
-        task.control_approved = False
-        task.control_url = ""
         agent = self.agent_for(None, url)
         ok, value = await self.call("ghost_tab_open", {"url": url, "actor_id": agent.id})
         if not ok or not isinstance(value, dict) or not isinstance(value.get("id"), int):
@@ -1697,7 +1680,6 @@ class ChatHub:
         task.agent, task.own_tab = agent, True
         task.trace.append({"do": "open", "url": url})
         task.tab_id = value["id"]
-        task.current_url = value.get("url") or url
         agent.opened = True
         agent.host = _host(value.get("url") or url)
         self.name_agent(agent)
@@ -1710,8 +1692,6 @@ class ChatHub:
         """The worker's mote on its tab: its color, its name, and what it's doing."""
         args = {"label": label or f"{task.label} · {task.title}"[:80], "color": task.color, "kind": "bot",
                 "status": status or "done", "ttl_ms": 600000 if status == "working" else 15000}
-        if self.owner_color:
-            args["owner_color"] = self.owner_color
         if isinstance(choice, int):
             args["choice"] = choice
         with suppress(Exception):
@@ -1898,8 +1878,9 @@ class ChatHub:
                 await self.publish()
                 return None
         first = here.get("url", "") if here else item["steps"][0].get("url", "")
+        # On the person's tab it's that tab's bot (one bot per tab); otherwise a bot for the tab it opens.
         task = self.add(Task(next(self.counter), item["name"], item.get("about", ""), first, "play", "parallel", "",
-                             self.agent_for(None, first)))
+                             self.agent_for(here["id"] if here else None, first)))
         task.automation, task.keep_open = item["id"], True
         # Full access: the person pressed Play themselves and is watching, so Send, Post and the like
         # run without asking. Scheduled runs and bots' runs still ask.
@@ -1999,6 +1980,22 @@ class ChatHub:
             self.say("mia", f"▶ {item['name']} · {mark}. {task.result}", task.color, task.id)
             print(f"[chat] play {item['id']} {task.status}: {task.result[:100]}")
             await self.publish()
+            await self.end_play_bot(task)
+
+    async def end_play_bot(self, task: Task) -> None:
+        """After a run its bot lives on only while its tab does: no tab (never opened, or closed meanwhile), no bot."""
+        agent = task.agent
+        if agent.id not in self.agents:
+            return
+        if agent.tab_id is None:
+            await self.drop(agent)
+            return
+        try:
+            tabs = await self.open_tabs()
+        except Exception:
+            return
+        if tabs and agent.tab_id not in {t.get("id") for t in tabs}:
+            await self.drop(agent)
 
     async def page_links(self, task: Task, keep_query: bool = False, within: str = "") -> tuple[list[str], str]:
         """Every web link on the page (or inside the within css), without fragment, trailing slash or
@@ -2313,7 +2310,10 @@ class ChatHub:
             elif "choice" in target:
                 text = element_label(line)
             else:
-                read = await self.play_call(task, "ghost_read", {"selector": step["css"], "max_chars": 4000})
+                # Read one character beyond the stored-value limit so a long
+                # source fails explicitly instead of being saved as complete.
+                read = await self.play_call(task, "ghost_read", {
+                    "selector": step["css"], "max_chars": automations.VALUE_CHARS + 1})
                 if isinstance(read, dict):
                     rendered = read.get("rendered_text")
                     # An empty rendered string is authoritative (e.g. a hidden
@@ -2325,7 +2325,11 @@ class ChatHub:
                 text = " ".join(text.split()[:step["words"]])
             if not text.strip():
                 raise RuntimeError("the copy target has no visible text")
-            values[step["as"]] = text[:automations.VALUE_CHARS]
+            if len(text) > automations.VALUE_CHARS:
+                raise RuntimeError(
+                    f"the copy target exceeds the {automations.VALUE_CHARS}-character Play value limit; "
+                    "nothing was copied")
+            values[step["as"]] = text
             return f"copied “{_text(text, 80)}” as {{{{{step['as']}}}}}"
         tool = {"click": "ghost_click", "type": "ghost_fill", "key": "ghost_key"}[do]
         args = {**target}
@@ -2433,7 +2437,6 @@ class ChatHub:
             raise StepFailed(1, {"do": "open", "url": url}, f"needs a web address (https://…), got “{_text(url, 60)}”")
         if not task.own_tab or task.tab_id is None:
             await self.move_to_own_tab(task, url)
-        task.control_approved, task.control_url = False, ""
 
     async def approve_urls(self, task: Task, urls: list[str]) -> bool:
         """A script a bot wrote or was handed opens addresses a model chose: the person checks each one

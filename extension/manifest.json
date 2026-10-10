@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Mia",
-  "version": "0.5.1",
+  "version": "0.5.4",
   "description": "Mia, your browser assistant: she and her bots read, compare and act on your tabs with you.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArDWpQaoSXn23ytqyUJ/zXj7WP+RTGlwvnz2na6ZzHxl1pwdETuXzmQrSUD2a28Oqw81KPdWyZq8++YXx4bjHRvjw7NyDyUdgoKksswtfQYdil09f4rW97lJfBI+1Ig1Tu7neZtIoS+Vuj36lJmRoaT6R8B+VNBO9lnSJyVKfYssXcs2T2zJmCRuMpa3OYR49jLXJ3hE89ngyT01y6xW+OvFMUm9p8Yko1ehfL4Iuz0Kc8hwEm+9wlo0draFUaMnynypgPjKCPr/pB512Y6+1dzDDKtyE0LgJ9dRydMDIH4++o/vn/wyImOjhmoZFCZBMez9GEVX1Z+PxKcjzUyEsswIDAQAB",
   "permissions": [
     "tabs",
     "activeTab",

@@ -228,8 +228,10 @@ class TokenFileTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GHOST_BRIDGE_TOKEN_FILE": str(path)}, clear=False):
                 token = load_bridge_token(create=True)
                 self.assertGreaterEqual(len(token.encode()), 32)
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                if os.name != "nt":  # Windows has no POSIX mode bits
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits and O_NOFOLLOW; Windows relies on NTFS ACLs")
     def test_rejects_permissive_token_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "token"
@@ -269,7 +271,7 @@ class BridgeClientTrustTests(unittest.TestCase):
                 transport.call("ghost_read", {})
 
     def test_websocket_cleanup_has_no_return_in_finally(self):
-        source = (Path(__file__).resolve().parent.parent / "bridge_server.py").read_text()
+        source = (Path(__file__).resolve().parent.parent / "bridge_server.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         returns_in_finally = []
         for node in ast.walk(tree):
@@ -317,6 +319,7 @@ class BridgeClientTrustTests(unittest.TestCase):
             with self.assertRaisesRegex(BridgeError, "stale or mismatched"):
                 transport.call("ghost_read", {})
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits and O_NOFOLLOW; Windows relies on NTFS ACLs")
     def test_rejects_token_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

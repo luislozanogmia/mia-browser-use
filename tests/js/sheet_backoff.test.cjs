@@ -16,6 +16,7 @@ function harness(responses) {
       return new Response(spec.body || '', {status: spec.status || 200,
         headers: {'content-type': spec.type || 'text/csv', ...(spec.headers || {})}});
     },
+    sheetTabGid: async (_tabId, _id, gid) => gid,
     waitForTabLoad: async () => {},
     chrome: {tabs: {update: async () => {}}, scripting: {
       executeScript: async ({args}) => {pastes++; payload = args[0]; return [{result: {pasted: 'A2'}}];}

@@ -12,15 +12,13 @@ import asyncio
 import json
 import os
 import re
-import secrets
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from ghost_room import ID_RE, page_key, room_origin, room_safe_href
+from ghost_room import ID_RE, page_key
 
 RECONNECT_MIN = 1.0
 RECONNECT_MAX = 30.0
-OPAQUE_PAGE_PREFIX = "https://room.invalid/p/"
 
 
 class RoomLink:
@@ -34,8 +32,8 @@ class RoomLink:
     ):
         if not url.startswith(("ws://", "wss://")):
             raise ValueError("room url must start with ws:// or wss://")
-        if url.startswith("ws://") and not re.match(r"^ws://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)", url):
-            raise ValueError("Use wss:// for a room that is not on this machine")
+        if not re.match(r"^ws://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)", url):
+            raise ValueError("The relay runs on this machine only (ws://127.0.0.1)")
         self.url = url
         self.room = room
         self.key = key
@@ -43,7 +41,6 @@ class RoomLink:
         self.on_message = on_message
         self.bots: dict[str, dict] = {}
         self.shared: dict[str, dict] = {}  # page key -> page
-        self.local_pages: dict[str, str] = {}  # local origin+path -> opaque room page URL
         self.presence: dict[str, dict] = {}  # remote actor id -> last presence
         self.members: dict[str, dict] = {}
         self.suggestions: dict[str, dict] = {}
@@ -146,33 +143,19 @@ class RoomLink:
                 self.decisions.pop(next(iter(self.decisions)))
 
     def is_shared(self, url: Any) -> bool:
-        key = self.room_page(url)
+        key = page_key(url)
         return bool(key and key in self.shared)
 
-    def room_page(self, url: Any) -> str | None:
-        key = page_key(url)
-        return self.local_pages.get(key, key) if key else None
-
-    def bind_local(self, url: Any, room_url: Any) -> bool:
-        local, remote = page_key(url), page_key(room_url)
-        if not local or not remote or remote != room_url or not remote.startswith(OPAQUE_PAGE_PREFIX):
-            return False
-        page = self.shared.get(remote)
-        if page and page.get("origin") != room_origin(local):
-            return False
-        self.local_pages[local] = remote
-        return True
-
     def presence_for(self, url: Any) -> list[dict]:
-        key = self.room_page(url)
+        key = page_key(url)
         return [p for p in self.presence.values() if p.get("url") == key]
 
     def suggestions_for(self, url: Any) -> list[dict]:
-        key = self.room_page(url)
+        key = page_key(url)
         return [s for s in self.suggestions.values() if s.get("url") == key]
 
     def asks_for(self, url: Any) -> list[dict]:
-        key = self.room_page(url)
+        key = page_key(url)
         return [a for a in self.asks.values() if a.get("url") == key]
 
     # -- publishing -----------------------------------------------------------
@@ -181,30 +164,7 @@ class RoomLink:
         if self._ws is None or not self.connected:
             return
         try:
-            outgoing = dict(message)
-            if outgoing.get("action") == "share" and isinstance(outgoing.get("page"), dict):
-                source = outgoing["page"]
-                local, origin = page_key(source.get("url")), room_origin(source.get("url"))
-                if not local or not origin:
-                    return
-                remote = source.get("room_url") or self.local_pages.get(local) or OPAQUE_PAGE_PREFIX + secrets.token_urlsafe(18)
-                if not isinstance(remote, str) or not remote.startswith(OPAQUE_PAGE_PREFIX) or page_key(remote) != remote:
-                    return
-                self.local_pages[local] = remote
-                outgoing["page"] = {"url": remote, "origin": origin, "title": origin,
-                                    **({"href": source["url"]} if source.get("share_link") is True else {})}
-            elif "url" in outgoing:
-                remote = self.room_page(outgoing["url"])
-                if not remote or not remote.startswith(OPAQUE_PAGE_PREFIX):
-                    return
-                outgoing["url"] = remote
-            if isinstance(outgoing.get("links"), list):
-                outgoing["links"] = [{**link, "href": room_safe_href(link.get("href"))}
-                                     for link in outgoing["links"] if isinstance(link, dict) and room_safe_href(link.get("href"))]
-            await self._ws.send(json.dumps(outgoing, ensure_ascii=False))
-            if outgoing.get("action") == "unshare":
-                self.local_pages = {local: remote for local, remote in self.local_pages.items()
-                                    if remote != outgoing["url"]}
+            await self._ws.send(json.dumps(message, ensure_ascii=False))
         except Exception:
             pass
 
@@ -267,6 +227,7 @@ def load_room_key(room: str) -> Optional[str]:
         info = path.stat()
     except OSError:
         return None
-    if info.st_mode & 0o077 or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+    # Windows has no POSIX mode bits; the profile folder is protected by NTFS ACLs.
+    if (os.name != "nt" and info.st_mode & 0o077) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
         raise ValueError(f"Room key file must be private to you (0600): {path}")
     return path.read_text(encoding="utf-8").strip() or None

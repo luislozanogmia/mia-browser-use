@@ -13,6 +13,7 @@ A script is a list of steps:
   {"do": "type", "css"/"text": ..., "value": "hi {{total}}"}
   {"do": "key", "key": "Enter", "css"/"text": optional}
   {"do": "copy", "css"/"text": ..., "as": "total"}          keeps the text for {{total}}
+  {"do": "copy", "source": "url", "as": "source_url"}     keeps the current page's complete URL
   {"do": "wait", "ms": 2000} or {"do": "wait", "css": "..."}
   {"do": "scroll", "direction": "down" | "up" | "top" | "bottom"}
 A copy step can keep only the first words: {"do": "copy", ..., "as": "first_name", "words": 1}.
@@ -38,6 +39,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 MAX_AUTOMATIONS = 50
 MAX_STEPS = 60
@@ -63,6 +65,44 @@ def _text(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _path_inputs(template: str, names: Any) -> set[str]:
+    if names is None:
+        return set()
+    if (not isinstance(names, list) or any(not isinstance(n, str) or not NAME.fullmatch(n) for n in names)
+            or len(names) != len(set(names))):
+        raise ValueError("path_inputs must be a list of distinct variable names")
+    parts = urlsplit(template)
+    path_names = set(VAR.findall(parts.path))
+    elsewhere = set(VAR.findall(parts.netloc + parts.query + parts.fragment))
+    if not set(names) <= path_names or set(names) & elsewhere or VAR.fullmatch(template):
+        raise ValueError("path_inputs variables must occur only in the URL path")
+    return set(names)
+
+
+def expand_url(template: str, values: dict, path_inputs: list[str] | None = None) -> str:
+    """A whole URL input stays intact; embedded values are URL components, expanded once."""
+    try:
+        paths = _path_inputs(template, path_inputs)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    def component(match):
+        value = str(values.get(match[1]) or "")
+        if match[1] not in paths:
+            return quote(value, safe="")
+        segments = value.split("/")
+        if any(s in {"", ".", ".."} for s in segments) or "\\" in value:
+            raise RuntimeError(f"{match[1]} needs nonempty path segments without traversal")
+        return "/".join(quote(segment, safe="") for segment in segments)
+    whole = VAR.fullmatch(template)
+    if whole:
+        url = str(values.get(whole[1]) or "").strip()
+    else:
+        url = VAR.sub(component, template)
+    if not re.match(r"^https?://", url):
+        raise RuntimeError(f"{template} needs a web address (https://…), got “{_text(url, 60)}”")
+    return url
+
+
 def clean_step(step: Any, loop: bool = False) -> dict | None:
     """One step as stored, or None when it's malformed. In a loop, open may go to {{link}}."""
     if not isinstance(step, dict) or step.get("do") not in ACTIONS:
@@ -79,10 +119,34 @@ def clean_step(step: Any, loop: bool = False) -> dict | None:
         out["label"] = label
     if do == "open":
         url = _text(step.get("url"), 1000)
+        try:
+            paths = _path_inputs(url, step.get("path_inputs"))
+        except ValueError:
+            return None
+        path_option = {"path_inputs": sorted(paths)} if paths else {}
         var = VAR.fullmatch(url)
         if var:  # {{link}} in a loop, or a page the person gives before Play (an input)
             return {"do": do, "url": f"{{{{{var[1]}}}}}"} if loop or var[1] != "link" else None
-        return {"do": do, "url": url} if re.match(r"^https?://", url) else None
+        return {"do": do, "url": url, **path_option} if re.match(r"^https?://", url) else None
+    if do == "copy" and "source" in step:
+        name = _text(step.get("as"), 31)
+        if step["source"] != "url" or css or text or "words" in step or not NAME.fullmatch(name):
+            return None
+        out = {"do": "copy", "source": "url", "as": name}
+        if "expected_url" in step:
+            expected = _text(step["expected_url"], 1000)
+            if not (re.match(r"^https?://", expected) or VAR.fullmatch(expected)):
+                return None
+            try:
+                paths = _path_inputs(expected, step.get("path_inputs"))
+            except ValueError:
+                return None
+            out["expected_url"] = expected
+            if paths:
+                out["path_inputs"] = sorted(paths)
+        elif "path_inputs" in step:
+            return None
+        return out
     if do in TARGETED and not (css or text):
         return None
     if do == "type":
@@ -145,6 +209,44 @@ def clean_schedule(schedule: Any) -> dict:
     return {"kind": "manual"}
 
 
+def validate_variables(item: dict, given: dict | None = None) -> None:
+    """Check variables where they are consumed, before later copy steps can define them.
+
+    With run inputs, also check the second expansion used by type steps: a message
+    template can use a copied name, but only after that name has been copied.
+    Unused input templates impose no dependencies on the script.
+    """
+    input_names = {i["name"] for i in item.get("inputs", [])}
+    known = input_names | {"page_url"}
+    if item.get("each"):
+        known.add("link")
+    templates = given if isinstance(given, dict) else {}
+    overwritten = set()
+    for n, step in enumerate(item["steps"], 1):
+        do = step["do"]
+        if do == "type":
+            text = step["value"]
+        elif do == "open":
+            text = step["url"]
+        elif do == "append":
+            text = " ".join([step["sheet"], step["tab"], step.get("unique", ""), *step["row"]])
+        elif do == "copy" and step.get("source") == "url":
+            text = step.get("expected_url", "")
+        else:
+            text = ""
+        used = set(VAR.findall(text)) | set(VAR.findall(step.get("text", "")))
+        if do == "type":
+            # Play expands type values twice; open and append expand only once.
+            for name in set(VAR.findall(text)) & input_names - overwritten:
+                used.update(VAR.findall(str(templates.get(name) or "")))
+        missing = sorted(used - known)
+        if missing:
+            raise ValueError(f"step {n} uses {{{{{missing[0]}}}}} without copying it first or asking for it")
+        if do == "copy":
+            known.add(step["as"])
+            overwritten.add(step["as"])
+
+
 def clean(data: Any) -> dict:
     """A whole automation from Mia's JSON: raises ValueError with a reason she can fix."""
     if not isinstance(data, dict):
@@ -174,16 +276,6 @@ def clean(data: Any) -> dict:
         if NAME.fullmatch(key) and key not in {i["name"] for i in inputs} and key != "link":
             inputs.append({"name": key, "label": _text(item.get("label"), 60) or key.replace("_", " ").capitalize(),
                            **clean_choices(item.get("choices")), **clean_column(item)})
-    # page_url is always known: the address of the page the run is on.
-    known = ({s["as"] for s in steps if s["do"] == "copy"} | {i["name"] for i in inputs}
-             | ({"link"} if links else set()) | {"page_url"})
-    used = ({m for s in steps if s["do"] == "type" for m in VAR.findall(s["value"])}
-            | {m for s in steps if s["do"] == "append"
-               for m in VAR.findall(" ".join([s["sheet"], s["tab"], s.get("unique", ""), *s["row"]]))}
-            | {m for s in steps if s["do"] == "open" for m in VAR.findall(s["url"])})
-    missing = sorted(used - known)
-    if missing:
-        raise ValueError(f"it uses {{{{{missing[0]}}}}} without copying it first or asking for it")
     out = {"name": name, "about": _text(data.get("about"), ABOUT_CHARS), "steps": steps,
            "schedule": clean_schedule(data.get("schedule")), "inputs": inputs}
     if links:
@@ -191,6 +283,7 @@ def clean(data: Any) -> dict:
         within = _text(each.get("within"), 200)
         if within:  # only links inside this part of the page (the results, not a menu)
             out["each"]["within"] = within
+    validate_variables(out)
     return out
 
 
@@ -210,6 +303,9 @@ def describe_step(step: dict) -> str:
     if do == "key":
         return f"Press {step['key']}" + (f" in {target}" if step.get("css") or step.get("text") else "")
     if do == "copy":
+        if step.get("source") == "url":
+            return (f"Copy the current page URL as {{{{{step['as']}}}}}"
+                    + (f" after it reaches {step['expected_url']}" if step.get("expected_url") else ""))
         if step["as"] == "first_name" and step.get("words") == 1:
             return "Copy the person's first name as {{first_name}}"
         if step["as"] == "full_name" and not step.get("text"):

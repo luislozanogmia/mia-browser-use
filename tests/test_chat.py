@@ -81,6 +81,19 @@ async def settle(hub):
             return
         await asyncio.sleep(0.01)
 
+async def approve_navigation(hub, count=1):
+    approved = set()
+    for _ in range(count):
+        for _ in range(100):
+            pending = [t for t in hub.tasks.values()
+                       if t.id not in approved and t.status == "needs_you" and t.question.startswith("Open ")]
+            if pending:
+                break
+            await asyncio.sleep(0.01)
+        assert pending, "expected navigation approval"
+        approved.add(pending[0].id)
+        await hub.handle({"action": "approve", "task": pending[0].id})
+
 def send(text, mode="ask", run="parallel"):
     return {"action": "send", "text": text, "mode": mode, "run": run,
             "tab": {"id": 5, "url": "https://mail.example/", "title": "Inbox"}}
@@ -93,15 +106,16 @@ def test_looking_things_up_goes_to_other_sites_in_its_own_tab_and_answers_in_cha
             {"done": "Top 5 jobs: ..."},
         ]], plan={"reply": "", "tasks": [{"title": "Find jobs", "goal": "Read my profile, find jobs", "kind": "ask"}]})
         await hub.handle(send("find me jobs"))
+        await approve_navigation(hub)
         await settle(hub)
         calls = [(c, a) for c, a in browser.actions() if c != "ghost_tab_list"]
         assert [c for c, _ in calls] == ["ghost_read", "ghost_tab_open", "ghost_wait", "ghost_read", "ghost_tab_close"]
         read = calls[0][1]
-        assert read["max_chars"] == 8000 and read["tab_id"] == 5 and read["human_ok"] is True
+        assert read["max_chars"] == 8000 and read["tab_id"] == 5 and read["human_ok"] is False
         # The person's tab stays put: the search opens in a tab of the worker's own, which keeps
         # working even while the person watches it.
         assert calls[1][1]["url"] == "https://jobs.example/search?q=ai"
-        assert calls[3][1]["tab_id"] == 77 and calls[3][1]["human_ok"] is True
+        assert calls[3][1]["tab_id"] == 77 and calls[3][1]["human_ok"] is False
         assert hub.messages[-1]["text"] == "Mia: Top 5 jobs: ..."  # Mia answers, from what her bot found
         assert sessions[0].closed
         # Mia closes the tab her bot opened once it has the answer, and the bot leaves the list.
@@ -132,7 +146,8 @@ def test_do_waits_for_approval_before_a_risky_click():
                 break
             await asyncio.sleep(0.01)
         clicks = [a for c, a in browser.actions() if c == "ghost_click"]
-        assert clicks == [{"choice": 1, "tab_id": 5, "actor_id": "mia-1", "human_ok": True}]
+        assert clicks == [{"choice": 1, "tab_id": 5, "actor_id": "mia-1", "human_ok": True,
+                           "expected_url": "https://mail.example/"}]
         assert task.status == "done" and hub.messages[-1]["text"] == "Mia: Sent."
     asyncio.run(main())
 
@@ -179,19 +194,21 @@ def test_parallel_tasks_get_their_own_tabs_and_never_eval():
             {"title": "B", "goal": "do b", "url": "https://b.example/"},
             {"title": "C", "goal": "bad", "url": "javascript:alert(1)"}]})
         await hub.handle(send("both", mode="do"))
+        await approve_navigation(hub, 2)
         await settle(hub)
         commands = [c for c, _ in browser.actions()]
         assert "ghost_eval" not in commands and commands.count("ghost_tab_open") == 2
         # The three bots run at once, so the bot on the current tab may read first: look at a new tab's read.
         read = next(a for c, a in browser.actions() if c == "ghost_read" and a.get("tab_id") == 77)
-        assert read["actor_id"].startswith("mia-") and read["human_ok"] is True
+        assert read["actor_id"].startswith("mia-") and read["human_ok"] is False
         # The javascript: url was dropped, so that task works on the current tab instead.
         assert [t.own_tab for t in hub.tasks.values()] == [True, True, False]
     asyncio.run(main())
 
 def test_stop_cancels_a_waiting_task():
     async def main():
-        hub, browser, _, _ = make_hub([[{"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?"}]],
+        hub, browser, _, _ = make_hub([[{"tool": "ghost_read", "args": {}},
+                                      {"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?"}]],
                                       plan={"tasks": [{"title": "T", "goal": "g", "url": ""}]})
         await hub.handle(send("x", mode="do"))
         task = next(iter(hub.tasks.values()))
@@ -307,10 +324,7 @@ def test_tasks_on_one_tab_wait_for_each_other():
             await asyncio.sleep(0)
         assert started == [] and hub.tasks["task-1"].status == "waiting"
         agent.lock.release()
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if hub.tasks["task-1"].status == "done":
-                break
+        await asyncio.wait_for(hub.tasks["task-1"].job, 5)
         assert started == ["a1"]
     asyncio.run(run())
 
@@ -333,8 +347,7 @@ def test_a_question_answered_from_context_starts_no_task_and_sees_what_was_expla
         hub.plan_run = planner
         hub.make_bot = lambda agent: FakeBot(agent, [("Fractional", "Part-time role.")])
         await hub.explain({"id": "a1", "question": "Explain this.", "text": "Fractional"}, 5, "https://mail.example/")
-        for _ in range(50):
-            await asyncio.sleep(0)
+        await asyncio.wait_for(next(iter(hub.tasks.values())).job, timeout=2)
         await hub.handle(send("so is this full time?"))
         assert len(hub.tasks) == 1 and hub.messages[-1]["text"] == "It means part-time."
         assert "Fractional. Part-time role." in prompts[0]  # the planner sees the tab's earlier answer
@@ -514,6 +527,7 @@ def test_a_bot_leaves_the_list_when_its_tab_closes_and_the_x_stops_and_closes_it
             return await _call(command, args)
         hub.call = slow
         await hub.handle(send("two things"))
+        await approve_navigation(hub)
         for _ in range(20):
             await asyncio.sleep(0.01)
         here = next(t for t in hub.tasks.values() if t.title == "Here").agent
@@ -548,6 +562,7 @@ def test_a_tab_the_person_asked_to_open_stays_open():
         hub, browser, _, _ = make_hub([[{"done": "LinkedIn is open."}]], plan={"reply": "", "tasks": [
             {"title": "Open LinkedIn", "goal": "open it", "kind": "ask", "url": "https://www.linkedin.com/", "keep_open": True}]})
         await hub.handle(send("open a linkedin bot"))
+        await approve_navigation(hub)
         await settle(hub)
         assert not any(c == "ghost_tab_close" for c, _ in browser.calls)
         assert hub.tasks["task-1"].status == "done" and hub.tasks["task-1"].agent.name == "LinkedIn bot"
@@ -609,6 +624,7 @@ def test_bots_run_sonnet_on_low_and_mia_runs_the_picked_model_on_medium(monkeypa
         hub, *_ = make_hub([[{"done": "Found it."}]], plan={"reply": "", "tasks": [
             {"title": "Look", "goal": "look it up", "kind": "ask", "url": "https://example.com/"}]})
         await hub.handle(send("look it up") | {"model": "claude-opus-5-5"})
+        await approve_navigation(hub)
         await settle(hub)
         assert (ghost_chat.WORKER_PROMPT, "claude-sonnet-5-5", "low") in hub.made
 
@@ -781,7 +797,8 @@ def test_a_bot_that_fails_or_is_stopped_still_reports_what_it_found():
         assert task.status == "failed"
         assert "model crashed" in task.result and "https://x.example/ana" in task.result and "https://x.example/bo" in task.result
 
-        hub, _, _, _ = make_hub([[{"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?", "found": "Cy · https://x.example/cy"}]],
+        hub, _, _, _ = make_hub([[{"tool": "ghost_read", "args": {}},
+                                {"tool": "ghost_click", "args": {"choice": 1}, "confirm": "Send?", "found": "Cy · https://x.example/cy"}]],
                                 plan={"tasks": [{"title": "T", "goal": "g"}]})
         await hub.handle(send("x", mode="do"))
         task = next(iter(hub.tasks.values()))
@@ -810,6 +827,20 @@ def test_alone_a_bot_takes_the_tab_without_asking():
         assert task.status == "done" and task.question == ""
         clicks = [a for c, a in browser.calls if c == "ghost_click"]
         assert clicks and clicks[0]["human_ok"] is True
+    asyncio.run(main())
+
+
+def test_planner_timeout_clears_published_busy_state_and_creates_no_task():
+    async def main():
+        hub, browser, states, sessions = make_hub([])
+        async def timeout(model, prompt):
+            raise asyncio.TimeoutError()
+        hub.plan_run = timeout
+        await hub.send(send("Build an automation"))
+        assert any(state["planning"] for state in states)
+        assert states[-1]["planning"] is False
+        assert not hub.tasks
+        assert "The model took too long to answer" in hub.messages[-1]["text"]
     asyncio.run(main())
 
 

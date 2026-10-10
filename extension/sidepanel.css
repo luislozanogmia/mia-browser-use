@@ -45,7 +45,7 @@ main { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: 
 .mia p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mia.thinking p { color: var(--muted); }
 
-.tasks { margin: 0 12px 8px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.tasks { flex-shrink: 0; margin: 0 12px 8px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
 .tasks-head { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; font-size: 12px; color: var(--muted); }
 .tasks-head strong { color: var(--text); font-weight: 600; }
 .tasks-toggle { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0;
@@ -80,7 +80,7 @@ main { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: 
 .pill.needs_you { background: var(--surface); color: var(--amber-ink); border: 1px solid var(--amber-line); }
 .pill.failed, .pill.stopped { color: var(--alert); }
 
-#approvals { display: flex; flex-direction: column; gap: 8px; margin: 0 12px; }
+#approvals { display: flex; flex-direction: column; flex-shrink: 0; max-height: 35%; overflow-y: auto; gap: 8px; margin: 0 12px; }
 #approvals:not(:empty) { margin-bottom: 8px; }
 .approval { border: 1.5px solid var(--c, var(--alert)); border-radius: 12px; padding: 10px 12px; background: var(--surface); }
 .approval .head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
@@ -213,7 +213,7 @@ body.in-plays .claude-bar { display: none !important; }
 .play-actions button.del { margin-left: auto; color: var(--alert); }
 .play-actions button:disabled { opacity: .5; cursor: default; }
 .play-input { display: flex; flex-direction: column; gap: 4px; font-weight: 500; }
-.play-input textarea { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; background: var(--surface);
+.play-input textarea, .play-input input { border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; background: var(--surface);
   font-size: 13px; font-weight: 400; }
 .play-detail ol .step { display: flex; align-items: flex-start; gap: 6px; }
 .play-detail ol .step span { flex: 1; }

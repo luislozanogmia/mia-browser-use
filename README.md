@@ -44,9 +44,9 @@ token to paste and nothing to start by hand. Logs go to `~/.ghost/bridge.log`.
 
 Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
 
-- **Ask** reads the page and answers. **Do** turns your request into tasks for
-  bots, one bot per tab, shown in the panel's Bots list. Anything that sends,
-  posts, submits, buys or deletes waits for your approval.
+- Mia decides whether a request needs reading or action and sends bots to the
+  relevant tabs. Anything that sends, posts, submits, buys or deletes waits for
+  your approval. An explicit Ask request remains read-only.
 - **Ask on the page:** select text, or crop an area with Alt+Shift+A. The answer
   appears as a card on the page, and you can reply to it. Page bots can search
   the web when the page doesn't say enough.
@@ -56,6 +56,16 @@ Click the Mia icon in the toolbar or press Alt+Shift+M to open the side panel.
   only. **Make PDF** turns it into a report.
 
 Mia answers with your own Claude account through Claude Code.
+
+To build an automation as an ongoing goal, start a message with `/goal`, followed by the job and
+representative test destinations. Mia discovers the real page, tests one script step at a time, and
+keeps proven steps locked while fixing a failure. Progress and observed test cases are saved privately
+under `~/.ghost/builds/`, including a readable `progress.md`, so a renewed model session can recover them.
+Send `/goal` alone to list builds, or `/goal resume Automation name` to continue an interrupted one.
+
+Rehearsal skips consequential actions and leaves them unverified. Live testing requires a disposable
+destination and normal action approvals. Before saving, independent reviews check reuse and evidence,
+then Opus 5.5 Medium checks the person's experience. Stop remains available during long builds.
 
 ## Hermes Desktop setup
 
